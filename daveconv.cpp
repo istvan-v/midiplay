@@ -376,6 +376,7 @@ static size_t optimizeTuneData(std::vector< int >& outBuf,
       tmpBufFrq[j] = p[chn << 1] | ((unsigned short) p[(chn << 1) + 1] << 8);
     }
     size_t  bestSize = 0x00FFFFFF;
+    size_t  bestSize2 = 0x0FFFFFFF;
     size_t  bestLen = 0;
     int     bestEnv = 0;
     for (size_t d = 1; d <= size_t(envelopeMaxDur) && (i + d) <= nFrames; d++) {
@@ -406,17 +407,22 @@ static size_t optimizeTuneData(std::vector< int >& outBuf,
         tmp[2] = (chn < 3 ? freq : (freq - 256));
         unsigned int  key = noteParamsToKey(&(tmp[0]));
         std::map< unsigned int, int >::const_iterator p = npMap->find(key);
-        if (p == npMap->end())
-          nBytes = 5;
-        else
-          nBytes = size_t(p->second);
+        size_t  nBytes_ = 0x05FFFFFF;
+        if (p != npMap->end())
+          nBytes_ = size_t(p->second);
+        nBytes = nBytes_ >> 24;
+        if (chn == 3 && nBytes == 5)
+          nBytes--;
+        nBytes = nBytes + tuneDataSize[i + d];
+        if (nBytes > bestSize || (nBytes == bestSize && nBytes_ > bestSize2))
+          continue;
+        bestSize2 = nBytes_;
       }
-      else if (n != envelopeBufFrames) {
-        nBytes = 4;
+      else {
+        if (n != envelopeBufFrames)
+          nBytes = (chn < 3 ? 4 : 3);
+        nBytes = nBytes + tuneDataSize[i + d];
       }
-      if (chn >= 3 && nBytes >= 4)
-        nBytes--;
-      nBytes = nBytes + tuneDataSize[i + d];
       if (nBytes <= bestSize) {
         bestSize = nBytes;
         bestLen = d;
@@ -485,15 +491,13 @@ static size_t optimizeTuneData2(std::vector< int >& outBuf,
            i != noteParamMap.end(); i++) {
         noteParamTable.push_back((long long) i->first
                                  | ((long long) i->second << 32));
-        i->second = 5;
       }
-      size_t  maxSize = (disableNPTable2 ? 255 : 510);
-      if (noteParamTable.size() > maxSize)
-        noteParamTable.resize(maxSize);
       std::stable_sort(noteParamTable.begin(), noteParamTable.end());
+      size_t  maxSize = (disableNPTable2 ? 255 : 510);
       for (size_t i = 0; i < noteParamTable.size(); i++) {
         noteParamMap[size_t(noteParamTable[i] & (long long) 0xFFFFFFFFU)] =
-            (i < (maxSize & 0xFF) ? 1 : 2);
+            int(i | (i < (maxSize & 0xFF) ?
+                     0x01000000 : (i < maxSize ? 0x02000000 : 0x05000000)));
       }
     }
     for (int c = 0; c < 4; c++) {
@@ -531,25 +535,18 @@ static size_t compressTuneData(std::vector< unsigned char >& outBuf,
     i->second = -1;
   }
   std::stable_sort(noteParamTable.begin(), noteParamTable.end());
-  if (disableNPTable2) {
-    if (noteParamTable.size() > 255)
-      noteParamTable.resize(255);
-    for (size_t i = 0; i < noteParamTable.size(); i++)
+  {
+    size_t  maxSize = (disableNPTable2 ? 255 : 510);
+    size_t  maxSize1 = maxSize & 0xFF;
+    if (noteParamTable.size() > maxSize)
+      noteParamTable.resize(maxSize);
+    maxSize = noteParamTable.size();
+    maxSize1 = (maxSize1 < maxSize ? maxSize1 : maxSize);
+    for (size_t i = 0; i < maxSize; i++)
       noteParamTable[i] = noteParamTable[i] & (long long) 0xFFFFFFFFU;
-    std::stable_sort(noteParamTable.begin(), noteParamTable.end());
-  }
-  else {
-    if (noteParamTable.size() > 510)
-      noteParamTable.resize(510);
-    for (size_t i = 0; i < noteParamTable.size(); i++)
-      noteParamTable[i] = noteParamTable[i] & (long long) 0xFFFFFFFFU;
-    if (noteParamTable.size() <= 254) {
-      std::stable_sort(noteParamTable.begin(), noteParamTable.end());
-    }
-    else {
-      std::stable_sort(noteParamTable.begin(), noteParamTable.begin() + 254);
-      std::stable_sort(noteParamTable.begin() + 254, noteParamTable.end());
-    }
+    std::stable_sort(noteParamTable.begin(), noteParamTable.begin() + maxSize1);
+    if (maxSize1 < maxSize)
+      std::stable_sort(noteParamTable.begin() + maxSize1, noteParamTable.end());
   }
   for (size_t i = 0; i < noteParamTable.size(); i++) {
     unsigned int  key = (unsigned int) noteParamTable[i];
