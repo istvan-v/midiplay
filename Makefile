@@ -36,20 +36,20 @@ loader.bin: loader.s
 $(PROGRAM): $(OBJS) ihx2ep loader.bin
 	$(SDCC) $(CFLAGS) $(LDFLAGS) $(OBJS) -o $(IHXNAME)
 	./ihx2ep $(IHXNAME) loader.bin $@
-	$(EPCOMPRESS) -m3 -9 -nocleanup -noborderfx $@ $@
+	$(EPCOMPRESS) -m3 -nocleanup -noborderfx $@ $@
 
 $(PROGRAM2): $(OBJS2) ihx2ep loader.bin
 	$(SDCC) $(CFLAGS) $(LDFLAGS) $(OBJS2) -o $(IHXNAME2)
 	./ihx2ep $(IHXNAME2) loader.bin $@
-	$(EPCOMPRESS) -m3 -9 -nocleanup -noborderfx $@ $@
+	$(EPCOMPRESS) -m3 -nocleanup -noborderfx $@ $@
 
 midi_asm.com: midiplay.s daveplay.s midi_in.s globals.s
 	$(SJASM) $< $@
-	$(EPCOMPRESS) -m3 -9 -nocleanup -noborderfx $@ $@
+	$(EPCOMPRESS) -m3 -nocleanup -noborderfx $@ $@
 
 mididisp.com: mididisp.s daveplay.s midi_in.s globals.s display.s pgmnames.s
 	$(SJASM) $< $@
-	$(EPCOMPRESS) -m3 -9 -nocleanup -noborderfx $@ $@
+	$(EPCOMPRESS) -m3 -nocleanup -noborderfx $@ $@
 
 $(OBJS): %.rel: %.c
 	$(SDCC) $(CFLAGS) -c $<
