@@ -379,20 +379,36 @@ static size_t optimizeTuneData(std::vector< int >& outBuf,
     size_t  bestSize2 = 0x0FFFFFFF;
     size_t  bestLen = 0;
     int     bestEnv = 0;
-    for (size_t d = 1; d <= size_t(envelopeMaxDur) && (i + d) <= nFrames; d++) {
+    for (size_t d = 1; (i + d) <= nFrames; d++) {
       int     n = envelopeBufFrames;
       int     freq = 0;
-      for (size_t j = 0; j < d; j++) {
-        if (tmpBufVol[j] != 0) {
-          n = 0;
-          freq = int(tmpBufFrq[j]);
-          while (++j < d) {
-            if (tmpBufVol[j] != 0 && int(tmpBufFrq[j]) != freq) {
-              n = -1;
-              break;
-            }
-          }
+      if (d > size_t(envelopeMaxDur)) {
+        if (d > 256 || envelopeMaxDur > 127 || (i + 256) > nFrames)
           break;
+        d = 256;
+        for (size_t j = 0; j < 256; j++) {
+          const unsigned char *p = &(inBuf.front()) + ((i + j) << 4);
+          if ((p[chn + 8] | p[chn + 12]) != 0) {
+            d = 0;
+            break;
+          }
+        }
+        if (!d)
+          break;
+      }
+      else {
+        for (size_t j = 0; j < d; j++) {
+          if (tmpBufVol[j] != 0) {
+            n = 0;
+            freq = int(tmpBufFrq[j]);
+            while (++j < d) {
+              if (tmpBufVol[j] != 0 && int(tmpBufFrq[j]) != freq) {
+                n = -1;
+                break;
+              }
+            }
+            break;
+          }
         }
       }
       if (!n)
