@@ -1,6 +1,6 @@
 
 // daveconv: converts raw DAVE register data to simple compressed format
-// Copyright (C) 2018-2019 Istvan Varga <istvanv@users.sourceforge.net>
+// Copyright (C) 2018-2020 Istvan Varga <istvanv@users.sourceforge.net>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -31,9 +31,9 @@ static size_t   trackOffsetsPos = 0x1800;
 static size_t   trackDataPos = 0x1808;
 static int      envelopeMaxDur = 31;
 static bool     envNoInterleave = false;
-static bool     disableNPTable2 = false;
 static bool     enableTuneDataOpt2 = false;
 static bool     disableMessages = false;
+static size_t   npTableCnt = 2;
 
 struct Envelopes {
   std::vector< std::vector< unsigned char > > envelopeData;
@@ -493,7 +493,7 @@ static size_t optimizeTuneData2(std::vector< int >& outBuf,
                                  | ((long long) i->second << 32));
       }
       std::stable_sort(noteParamTable.begin(), noteParamTable.end());
-      size_t  maxSize = (disableNPTable2 ? 255 : 510);
+      size_t  maxSize = npTableCnt * 255;
       for (size_t i = 0; i < noteParamTable.size(); i++) {
         noteParamMap[size_t(noteParamTable[i] & (long long) 0xFFFFFFFFU)] =
             int(i | (i < (maxSize & 0xFF) ?
@@ -536,7 +536,7 @@ static size_t compressTuneData(std::vector< unsigned char >& outBuf,
   }
   std::stable_sort(noteParamTable.begin(), noteParamTable.end());
   {
-    size_t  maxSize = (disableNPTable2 ? 255 : 510);
+    size_t  maxSize = npTableCnt * 255;
     size_t  maxSize1 = maxSize & 0xFF;
     if (noteParamTable.size() > maxSize)
       noteParamTable.resize(maxSize);
@@ -551,10 +551,7 @@ static size_t compressTuneData(std::vector< unsigned char >& outBuf,
   for (size_t i = 0; i < noteParamTable.size(); i++) {
     unsigned int  key = (unsigned int) noteParamTable[i];
     size_t  offs = envelopeBufSize;
-    if (disableNPTable2)
-      offs = offs + (i + 1);
-    else
-      offs = offs + (i < 254 ? 0x0000 : 0x0400) + ((i + 2) & 0xFF);
+    offs = offs + (((i + npTableCnt) >> 8) << 10) + ((i + npTableCnt) & 0xFF);
     outBuf[offs + 0x0000] = (unsigned char) ((key >> 24) & 0xFFU);  // d, env H
     outBuf[offs + 0x0100] = (unsigned char) ((key >> 16) & 0xFFU);  // env L
     outBuf[offs + 0x0200] = (unsigned char) (key & 0xFFU);          // freq L
@@ -582,13 +579,10 @@ static size_t compressTuneData(std::vector< unsigned char >& outBuf,
       if (chn != 3)
         outBuf.push_back((unsigned char) (frq >> 8));
     }
-    else if (disableNPTable2) {
-      outBuf.push_back((unsigned char) (c + 1));
-    }
     else {
-      if (c >= 254)
-        outBuf.push_back(0x01);
-      outBuf.push_back((unsigned char) ((c + 2) & 0xFF));
+      if (c >= int(256 - npTableCnt))
+        outBuf.push_back((unsigned char) ((c + npTableCnt) >> 8));
+      outBuf.push_back((unsigned char) ((c + npTableCnt) & 0xFF));
     }
     if (!d) {
       newChannel = true;
@@ -839,7 +833,7 @@ static void setEnvBufSize(size_t n)
   envelopeBufSize = n;
   envelopeBufSamples = envelopeBufSize - 4;
   envelopeBufFrames = int(envelopeBufSamples >> 1);
-  trackOffsetsPos = envelopeBufSize + (disableNPTable2 ? 0x0400 : 0x0800);
+  trackOffsetsPos = envelopeBufSize + (npTableCnt << 10);
   trackDataPos = trackOffsetsPos + 8;
   envelopeMaxDur = 131072 / int(envelopeBufSize) - 1;
 }
@@ -855,7 +849,8 @@ static void printUsage(const char *prgName, const char *errMsg = (char *) 0)
       "    z:  zero frequency if volume is zero\n"
       "    e0..e4: envelope buffer size (2^(N+9) bytes, default: e3 (4096))\n"
       "    n:  non-interleaved envelope data\n"
-      "    d:  disable second note parameter table (1024 bytes)\n"
+      "    p1..p8: number of note parameter tables, default: p2 (2048 bytes)\n"
+      "    d:  use only one note parameter table (same as p1)\n"
       "    s:  find the threshold and max. duration for minimum data size\n"
       "    f:  find the threshold and max. duration for minimum file size\n",
       prgName);
@@ -945,8 +940,17 @@ int main(int argc, char **argv)
           envNoInterleave = true;
         }
         else if (c == 'd') {
-          disableNPTable2 = true;
+          npTableCnt = 1;
           setEnvBufSize(envelopeBufSize);
+        }
+        else if (c == 'p') {
+          if (!(*s >= '1' && *s <= '8')) {
+            printUsage(argv[0], "invalid number of note parameter tables");
+            return -1;
+          }
+          npTableCnt = size_t(*s - '0');
+          setEnvBufSize(envelopeBufSize);
+          s++;
         }
         else if (c == 's') {
           optimizeParams = 1;
