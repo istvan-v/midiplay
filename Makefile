@@ -21,6 +21,8 @@ midiconv: midiconv_linux64 midiconv.exe
 
 daveconv: daveconv_linux64 daveconv.exe
 
+daveconv2: daveconv2_linux64 daveconv2.exe
+
 ihx2ep: ihx2ep.c
 	$(CC) -Wall -O2 $< -o $@ -s
 
@@ -71,6 +73,12 @@ daveconv_linux64: daveconv.cpp
 daveconv.exe: daveconv.cpp
 	x86_64-w64-mingw32-g++ -m64 -static -Wall -O2 $< -o $@ -s
 
+daveconv2_linux64: daveconv2.cpp
+	$(CXX) -m64 -Wall -O2 $< -o $@ -s
+
+daveconv2.exe: daveconv2.cpp
+	x86_64-w64-mingw32-g++ -m64 -static -Wall -O2 $< -o $@ -s
+
 clean:
 	-rm *.asm *.ihx *.lk *.lst *.map *.noi *.sym ihx2ep envelope.bin
 	-rm *.rel loader.bin ihx2ep.exe ihx2ep32.exe
@@ -78,4 +86,5 @@ clean:
 distclean: clean
 	-rm $(PROGRAM) $(PROGRAM2) midi_asm.com mididisp.com
 	-rm midiconv_linux64 midiconv.exe daveconv_linux64 daveconv.exe
+	-rm daveconv2_linux64 daveconv2.exe
 
