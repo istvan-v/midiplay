@@ -232,7 +232,7 @@ daveChannels:
         block   5 * 4, 00h
 
 fileName:
-        defb    1, 00h
+        defb    0
 
         block   musicData - $, 00h
 
