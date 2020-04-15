@@ -52,7 +52,6 @@ main:
         ld      (0038h), a
         ld      hl, irqRoutine
         ld      (0039h), hl
-        ld      hl, musicData
         call    musicInit
         ei
 .l1:    jr      .l1
@@ -130,7 +129,7 @@ musicInit:
 
   macro daveChnRegsPlay reg0, reg1, lenvt, ltptr
 .l1:    ld      a, 0                    ; * envelope timer * 4
-        sub     4
+        sub     c                       ; C = 4
         jr      nc, .l4
 .l2:    ld      hl, 0000h               ; * track data pointer
         ld      a, (hl)
@@ -154,7 +153,7 @@ musicInit:
 .l6:    ld      (.l2 + 1), hl
         ld      l, a
     if reg0 < 0a8h
-        ld      h, high noteParamTableF + 1
+        ld      h, high (noteParamTableF + 0100h)
         ld      a, (hl)
         dec     h
         ld      e, (hl)
@@ -174,10 +173,9 @@ musicInit:
         jr      c, musicRestart         ; end of track?
     endif
 .l8:    ld      (.l1 + 1), a            ; store (duration - 1) * 4
-        ccf
-        sbc     a, a                    ; 00h: use table, 1FFh: literal/RLE
-        add     a, 22h                  ; 21h: LD HL, nn
-        ld      (.l9), a                ; 22h: LD (nn), HL
+        ld      a, b                    ; BC = 1D04h
+        adc     a, c                    ; 21h: literal/RLE: LD HL, nn
+        ld      (.l9), a                ; 22h: use table:   LD (nn), HL
         ld      l, e
         ld      h, d
         ld      (.l5 + 1), hl
@@ -200,6 +198,7 @@ musicRestart:
         call    musicInit
 
 musicPlay:
+        ld      bc, 1d04h
         daveChnRegsPlay 0a0h, 0a1h, envTimerF0, trackPtrF0
         daveChnRegsPlay 0a8h, 0ach, envTimerV0, trackPtrV0
         daveChnRegsPlay 0a2h, 0a3h, envTimerF1, trackPtrF1
