@@ -9,5 +9,5 @@ midiconv: converts standard MIDI files to a simplified format (single track, fix
 
 daveconv: converts raw DAVE register data created with "midiconv -render" to a simple compressed format. Sample Z80 code for playing the output of daveconv can be found in xorplay2K.s and xorplay4K.s
 
-daveconv2, dav2play.s: another utility for compressing raw DAVE register data, it can be more efficient on large and complex input files
+daveconv2, dav2play.s, dav2p\_dn.s, dav2pl1t.s: another utility for compressing raw DAVE register data, it can be more efficient on large and complex input files
 
