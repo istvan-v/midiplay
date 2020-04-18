@@ -89,13 +89,13 @@ resetRoutine:
 
 musicData       equ     1000h
         assert  (musicData & 00ffh) == 0
-noteParamTableF equ     musicData
-noteParamTableV equ     noteParamTableF + 0200h
-trackOffsets    equ     noteParamTableV + 0100h
+noteParamTables equ     musicData
+trackOffsets    equ     noteParamTables + 0300h
 
 musicInit:
         xor     a
-        di
+.l1:    di                              ; A = 80h on restart
+        add     a, a
         out     (0a7h), a
         ld      (envTimerF0), a
         ld      (envTimerV0), a
@@ -105,7 +105,7 @@ musicInit:
         ld      (envTimerV2), a
         ld      (envTimerF3), a
         ld      (envTimerV3), a
-        ld      (.l1 + 1), sp
+        ld      (.l2 + 1), sp
         ld      sp, trackOffsets
         pop     hl
         ld      (trackPtrF0), hl
@@ -123,19 +123,19 @@ musicInit:
         ld      (trackPtrV2), hl
         pop     hl
         ld      (trackPtrV3), hl
-.l1:    ld      sp, 0000h               ; *
+.l2:    ld      sp, 0000h               ; *
 ;       ei
-        ret
+        ret     nc                      ; not restart?
 
   macro daveChnRegsPlay reg0, reg1, lenvt, ltptr
-.l1:    ld      a, 0                    ; * envelope timer * 4
-        sub     c                       ; C = 4
-        jr      nc, .l4
+.l1:    ld      a, 0                    ; * envelope timer * 2
+        add     a, a
+        jr      nz, .l5
 .l2:    ld      hl, 0000h               ; * track data pointer
         ld      a, (hl)
         inc     hl
         add     a, a
-        jr      c, .l6                  ; using parameter table?
+        jr      c, .l3                  ; using parameter table?
         ld      e, (hl)
         inc     hl
     if reg0 == 0a6h
@@ -144,49 +144,47 @@ musicInit:
         ld      d, (hl)
         inc     hl
 .l3:    ld      (.l2 + 1), hl
-        jr      .l7
-.l4:    ld      (.l1 + 1), a
-.l5:    ld      hl, 0000h               ; * envelope data pointer
+        jr      nc, .l4
+    if reg0 < 0a8h
+        rrca
+    else
+        rra
+    endif
+        ld      l, a
+        ld      h, b                    ; B = high noteParamTables
+        ld      a, (hl)
+        inc     h
+        ld      e, (hl)
+        inc     h
+        ld      d, (hl)
+.l4:    ex      de, hl                  ; A < 80h: literal/RLE,
+        cp      c                       ; A > 80h: use table (C = 80h)
+    if reg0 == 0a0h
+        jr      z, musicInit.l1         ; end of track?
+    endif
+        jr      nc, .l7
+        ld      (.l6 + 1), hl
+        jr      .l8
+.l5:    adc     a, 256 - 4
+        rrca
+.l6:    ld      hl, 0000h               ; * envelope data pointer
+        jr      nc, .l8
         inc     l
         inc     hl
-        jr      .l9
-.l6:    ld      (.l2 + 1), hl
-        ld      l, a
-    if reg0 < 0a8h
-        ld      h, high (noteParamTableF + 0100h)
-        ld      a, (hl)
-        dec     h
-        ld      e, (hl)
-        inc     l
-        ld      d, (hl)
-    else
-        ld      h, high noteParamTableV
-        ld      e, (hl)
-        inc     l
-        ld      d, (hl)
-        dec     h
-        ld      a, (hl)
-    endif
-.l7:    add     a, a
-    if reg0 == 0a0h
-        jr      nz, .l8
-        jr      c, musicRestart         ; end of track?
-    endif
-.l8:    ld      (.l1 + 1), a            ; store (duration - 1) * 4
-        ld      a, b                    ; BC = 1D04h
-        adc     a, c                    ; 21h: literal/RLE: LD HL, nn
-        ld      (.l9), a                ; 22h: use table:   LD (nn), HL
-        ld      l, e
-        ld      h, d
-        ld      (.l5 + 1), hl
-.l9:    ld      (.l5 + 1), hl           ; *
-        ld      a, (hl)
+.l7:    ld      (.l6 + 1), hl
     if reg0 != 0a6h
+        ld      e, (hl)
         inc     l
+        ld      h, (hl)
+        ld      l, e
+    else
+        ld      l, (hl)
     endif
+.l8:    ld      (.l1 + 1), a            ; store (duration - 1) * 2
+        ld      a, l
         out     (reg0), a
     if reg0 != 0a6h
-        ld      a, (hl)
+        ld      a, h
         out     (reg1), a
     endif
 
@@ -194,11 +192,8 @@ lenvt   equ     .l1 + 1
 ltptr   equ     .l2 + 1
   endm
 
-musicRestart:
-        call    musicInit
-
 musicPlay:
-        ld      bc, 1d04h
+        ld      bc, noteParamTables + 0080h
         daveChnRegsPlay 0a0h, 0a1h, envTimerF0, trackPtrF0
         daveChnRegsPlay 0a8h, 0ach, envTimerV0, trackPtrV0
         daveChnRegsPlay 0a2h, 0a3h, envTimerF1, trackPtrF1
