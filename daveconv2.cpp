@@ -30,6 +30,7 @@ static const size_t lengthMaxValue = 64;
 static const size_t rleOffsetFlag = 0x00400000;
 static const size_t loadAddrDiffFlag = 0x0001;
 static const size_t loadAddrNIFlag = 0x0002;
+static const size_t loadAddr1TrkFlag = 0x0004;
 
 static void errorMessage(const char *fmt, ...)
 {
@@ -355,10 +356,11 @@ static void createEnvTables(
     const std::vector< unsigned int >& len,
     const std::vector< unsigned int >& offs)
 {
+  size_t  envOffs = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
   outBuf.clear();
   npMapF.clear();
   npMapV.clear();
-  outBuf.resize(envBuf.size() * 2 + 0x0310, 0);
+  outBuf.resize(envBuf.size() * 2 + envOffs, 0);
   size_t  nFrames = len.size() >> 3;
   for (size_t i = 0; i < 2; i++) {
     std::map< unsigned int, int > envCnts;
@@ -383,8 +385,11 @@ static void createEnvTables(
     std::sort(tmp.begin(), tmp.end());
     if (tmp.size() > 128)
       tmp.resize(128);
-    for (size_t j = 0; j < tmp.size(); j++)
-      tmp[j] = (tmp[j] & 0xFFFFFFFFUL) | ((tmp[j] & 0xFFUL) << 32);
+    for (size_t j = 0; j < tmp.size(); j++) {
+      tmp[j] = (tmp[j] & 0xFFFFFFFFUL)
+               | ((tmp[j] & 0xFFUL) << 48) | ((tmp[j] & 0x00FFFF00UL) << 24)
+               | ((~tmp[j] & (rleOffsetFlag << 8)) << 32);
+    }
     std::sort(tmp.begin(), tmp.end());
     for (unsigned char j = 0; j < 128; j++) {
       unsigned int  np = 0;
@@ -398,26 +403,35 @@ static void createEnvTables(
         l = (unsigned char) (((np & 0xFF) - 1) << 1);
         np = np >> 8;
         if (!(np & rleOffsetFlag)) {
-          np = (np << 1) + loadAddr + 0x0310;
+          np = np << (unsigned char) (!(loadAddr & loadAddrNIFlag));
+          np = np + (loadAddr & 0xFF00) + envOffs;
           l = l | 0x80;
         }
         np = np & 0xFFFF;
       }
-      if (!i) {
-        outBuf[size_t(j << 1) | 0x0000] = (unsigned char) (np & 0xFF);
-        outBuf[size_t(j << 1) | 0x0001] = (unsigned char) (np >> 8);
-        outBuf[size_t(j << 1) | 0x0100] = l;
-      }
-      else {
-        outBuf[size_t(j << 1) | 0x0200] = (unsigned char) (np & 0xFF);
-        outBuf[size_t(j << 1) | 0x0201] = (unsigned char) (np >> 8);
-        outBuf[size_t(j << 1) | 0x0101] = l;
-      }
+      outBuf[size_t(j) | (i << 7) | 0x0000] = l;
+      outBuf[size_t(j) | (i << 7) | 0x0100] = (unsigned char) (np & 0xFF);
+      outBuf[size_t(j) | (i << 7) | 0x0200] = (unsigned char) (np >> 8);
     }
   }
-  for (size_t i = 0; i < envBuf.size(); i++) {
-    outBuf[0x0310 + (i << 1)] = (unsigned char) (envBuf[i] & 0xFF);
-    outBuf[0x0310 + (i << 1) + 1] = (unsigned char) (envBuf[i] >> 8);
+  if (!(loadAddr & loadAddrNIFlag)) {
+    for (size_t i = 0; i < envBuf.size(); i++) {
+      outBuf[envOffs + (i << 1)] = (unsigned char) (envBuf[i] & 0xFF);
+      outBuf[envOffs + (i << 1) + 1] = (unsigned char) (envBuf[i] >> 8);
+    }
+  }
+  else {
+    for (size_t i = 0; i < envBuf.size(); i++) {
+      outBuf[envOffs + i] = (unsigned char) (envBuf[i] & 0xFF);
+      outBuf[envOffs + i + envBuf.size()] = (unsigned char) (envBuf[i] >> 8);
+    }
+  }
+  if (loadAddr & loadAddrDiffFlag) {
+    size_t  d = size_t(!(loadAddr & loadAddrNIFlag)) + 1;
+    for (size_t i = envBuf.size() * 2; i-- > d; ) {
+      outBuf[envOffs + i] =
+          (outBuf[envOffs + i] - outBuf[envOffs + i - d]) & 0xFF;
+    }
   }
 }
 
@@ -433,8 +447,7 @@ static size_t optimizeTrackData(
     const std::map< unsigned int, unsigned char >& npMapV)
 {
   size_t  nFrames = inBuf.size() >> 3;
-  std::vector< unsigned int > offsTable(lengthMaxValue * sizeof(unsigned short),
-                                        0U);
+  std::vector< unsigned int > offsTable(maxLen * sizeof(unsigned short), 0U);
   std::vector< unsigned int > byteCnts(nFrames * 8 + 1, 0);
   std::vector< unsigned int > byteCntsNoEnv(nFrames * 8 + 1, 0);
   RadixTree   envTree;
@@ -458,36 +471,30 @@ static size_t optimizeTrackData(
     size_t  bestSizeNoEnv = 0x7FFFFFFF;
     size_t  bestLen = 1;
     size_t  bestOffs = rleOffsetFlag;
+    for (size_t j = 1; j <= n; j++) {
+      if (inBuf[i + j - 1] != inBuf[i])
+        break;
+      size_t  nBytes = byteCnts[i + j] + 1;
+      if (npMap.find((unsigned int) (((rleOffsetFlag | inBuf[i]) << 8) | j))
+          == npMap.end()) {
+        nBytes = nBytes + 2 - size_t(i >= (nFrames * 3) && i < (nFrames * 4));
+      }
+      if (nBytes <= bestSize) {
+        bestSize = nBytes;
+        bestSizeNoEnv = nBytes + byteCntsNoEnv[i + j] - byteCnts[i + j];
+        bestLen = j;
+        bestOffs = rleOffsetFlag | inBuf[i];
+      }
+    }
     size_t  maxEnvLen =
         envTree.findMatches(
             &(offsTable.front()),
             reinterpret_cast< const unsigned char * >(&(envBuf.front())),
             reinterpret_cast< const unsigned char * >(&(inBuf.front()))
-            + (i * sizeof(unsigned short)), n * sizeof(unsigned short))
+            + (i * sizeof(unsigned short)),
+            (n < maxLen ? n : maxLen) * sizeof(unsigned short))
         / sizeof(unsigned short);
-    bool    isRLE = true;
-    for (size_t j = 1; j <= n; j++) {
-      isRLE = (isRLE && (inBuf[i + j - 1] == inBuf[i]));
-      if (j > maxLen && !isRLE)
-        break;
-      if (isRLE) {
-        size_t  nBytes = byteCnts[i + j] + 1;
-        if (npMap.find((unsigned int) (((rleOffsetFlag | inBuf[i]) << 8) | j))
-            == npMap.end()) {
-          nBytes = nBytes + 2 - size_t(i >= (nFrames * 3) && i < (nFrames * 4));
-        }
-        if (nBytes <= bestSize) {
-          bestSize = nBytes;
-          bestSizeNoEnv = nBytes + byteCntsNoEnv[i + j] - byteCnts[i + j];
-          bestLen = j;
-          bestOffs = rleOffsetFlag | inBuf[i];
-        }
-      }
-      if (j < 2 || j > maxEnvLen) {
-        if (isRLE)
-          continue;
-        break;
-      }
+    for (size_t j = 2; j <= maxEnvLen; j++) {
       size_t  k = offsTable[j * sizeof(unsigned short) - 1]
                   / sizeof(unsigned short);
       size_t  envBytes = 0;
@@ -520,40 +527,78 @@ static size_t optimizeTrackData(
 
 static void writeTrackData(
     std::vector< unsigned char >& outBuf, size_t loadAddr,
+    unsigned int len, unsigned int offs, bool isChn3Freq,
+    const std::map< unsigned int, unsigned char >& npMap)
+{
+  std::map< unsigned int, unsigned char >::const_iterator i =
+      npMap.find((offs << 8) | len);
+  if (i != npMap.end()) {
+    outBuf.push_back(i->second);
+  }
+  else if (!(offs & rleOffsetFlag)) {
+    outBuf.push_back((unsigned char) ((len - 1) | 0x40));
+    size_t  tmp =
+        (offs << (unsigned char) (!(loadAddr & loadAddrNIFlag)))
+        + (loadAddr & 0xFF00)
+        + (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
+    outBuf.push_back((unsigned char) (tmp & 0xFF));
+    outBuf.push_back((unsigned char) (tmp >> 8));
+  }
+  else {
+    outBuf.push_back((unsigned char) (len - 1));
+    outBuf.push_back((unsigned char) (offs & 0xFF));
+    if (!isChn3Freq)
+      outBuf.push_back((unsigned char) (offs >> 8));
+  }
+}
+
+static void writeTrackData(
+    std::vector< unsigned char >& outBuf, size_t loadAddr,
     const std::vector< unsigned int >& len,
     const std::vector< unsigned int >& offs,
     const std::map< unsigned int, unsigned char >& npMapF,
     const std::map< unsigned int, unsigned char >& npMapV)
 {
   size_t  nFrames = len.size() >> 3;
-  size_t  trackOffs = loadAddr + outBuf.size();
-  for (size_t i = 0; i < len.size(); i = i + len[i]) {
-    if ((i % nFrames) == 0) {
-      if (i == nFrames)
+  if (!(loadAddr & loadAddr1TrkFlag)) {
+    for (size_t i = 0; i < 8; i++) {
+      size_t  trackOffs = (loadAddr & 0xFF00) + outBuf.size();
+      outBuf[0x0300 + (i << 1)] = (unsigned char) (trackOffs & 0xFF);
+      outBuf[0x0301 + (i << 1)] = (unsigned char) (trackOffs >> 8);
+      for (size_t j = nFrames * i; j < (nFrames * (i + 1)); j = j + len[j]) {
+        writeTrackData(outBuf, loadAddr, len[j], offs[j], (i == 3),
+                       (i < 4 ? npMapF : npMapV));
+      }
+      if (i == 0)
         outBuf.push_back(0x40);
-      trackOffs = loadAddr + outBuf.size();
-      outBuf[768 + ((i / nFrames) << 1)] = (unsigned char) (trackOffs & 0xFF);
-      outBuf[768 + ((i / nFrames) << 1) + 1] = (unsigned char) (trackOffs >> 8);
     }
-    const std::map< unsigned int, unsigned char >&  npMap =
-        (i < (nFrames * 4) ? npMapF : npMapV);
-    std::map< unsigned int, unsigned char >::const_iterator j =
-        npMap.find((offs[i] << 8) | len[i]);
-    if (j != npMap.end()) {
-      outBuf.push_back(j->second);
+  }
+  else {
+    size_t  envTimers[8];
+    size_t  trackPtrs[8];
+    for (size_t i = 0; i < 8; i++) {
+      envTimers[i] = 0;
+      trackPtrs[i] = nFrames * (((i & 1) << 2) | ((i & 6) >> 1));
     }
-    else if (!(offs[i] & rleOffsetFlag)) {
-      outBuf.push_back((unsigned char) ((len[i] - 1) | 0x40));
-      size_t  tmp = (offs[i] << 1) + loadAddr + 0x0310;
-      outBuf.push_back((unsigned char) (tmp & 0xFF));
-      outBuf.push_back((unsigned char) (tmp >> 8));
+    {
+      size_t  trackOffs = (loadAddr & 0xFF00) + outBuf.size();
+      outBuf[0x0300] = (unsigned char) (trackOffs & 0xFF);
+      outBuf[0x0301] = (unsigned char) (trackOffs >> 8);
     }
-    else {
-      outBuf.push_back((unsigned char) (len[i] - 1));
-      outBuf.push_back((unsigned char) (offs[i] & 0xFF));
-      if (!(i >= (nFrames * 3) && i < (nFrames * 4)))
-        outBuf.push_back((unsigned char) (offs[i] >> 8));
+    for (size_t i = 0; true; i = ((i + 1) & 7)) {
+      if (envTimers[i] > 1) {
+        envTimers[i]--;
+        continue;
+      }
+      size_t  j = trackPtrs[i];
+      if ((i == 0 && j >= nFrames) || j >= len.size())
+        break;
+      writeTrackData(outBuf, loadAddr, len[j], offs[j], (i == 6),
+                     (!(i & 1) ? npMapF : npMapV));
+      envTimers[i] = len[j];
+      trackPtrs[i] = j + len[j];
     }
+    outBuf.push_back(0x40);
   }
 }
 
@@ -712,73 +757,105 @@ static void decodeFile(std::vector< unsigned char >& outBuf,
                        size_t loadAddr)
 {
   outBuf.clear();
-  if (inBuf.size() < 0x0311)
+  size_t  envOffs = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
+  size_t  envSize = 0;
+  if (inBuf.size() < (envOffs + 1))
     errorMessage("invalid data size");
+  size_t  envTimers[8];
+  size_t  envPtrs[8];
+  size_t  trackPtrs[8];
   for (size_t i = 0; i < 8; i++) {
-    size_t  p =
-        (size_t(inBuf[0x0301 + (i << 1)]) << 8) | inBuf[0x0300 + (i << 1)];
-    if (p < (loadAddr + 0x0310))
+    envTimers[i] = 0;
+    envPtrs[i] = 0;
+    size_t  j = 0x0300;
+    if (!(loadAddr & loadAddr1TrkFlag))
+      j = j + (((i & 1) << 3) | (i & 6));
+    trackPtrs[i] = (size_t(inBuf[j + 1]) << 8) | inBuf[j];
+    if (trackPtrs[i] < ((loadAddr & 0xFF00) + envOffs + envSize))
       errorMessage("invalid track offset");
-    p = p - loadAddr;
-    for (size_t n = 0; true; ) {
-      if (i > 0 && n >= (outBuf.size() >> 4))
-        break;
+    trackPtrs[i] = trackPtrs[i] - (loadAddr & 0xFF00);
+    if (i == 0) {
+      envSize = trackPtrs[i] - envOffs;
+      if ((envOffs + envSize) > inBuf.size())
+        errorMessage("invalid track offset");
+    }
+  }
+  std::vector< unsigned char >  envData;
+  envData.insert(envData.end(),
+                 inBuf.begin() + envOffs, inBuf.begin() + (envOffs + envSize));
+  if (loadAddr & loadAddrDiffFlag) {
+    size_t  d = size_t(!(loadAddr & loadAddrNIFlag)) + 1;
+    for (size_t i = d; i < envData.size(); i++)
+      envData[i] = (envData[i] + envData[i - d]) & 0xFF;
+  }
+  for (size_t i = 0; true; i = ((i + 1) & 7)) {
+    if ((envTimers[i] & 0x3F) < 1) {
+      size_t& p = trackPtrs[(!(loadAddr & loadAddr1TrkFlag) ? i : 0)];
       if (p >= inBuf.size())
         errorMessage("unexpected end of data");
       unsigned char c = inBuf[p];
-      size_t  offs = 0;
+      if (c == 0x40 && i == 0)
+        break;
       p++;
-      if (c >= 0x80) {
-        c = (c & 0x7F) << 1;
-        if (i < 4) {
-          offs = (size_t(inBuf[size_t(c) | 0x0001]) << 8)
-                 | inBuf[size_t(c) | 0x0000];
-          c = inBuf[size_t(c) | 0x0100] >> 1;
-        }
-        else {
-          offs = (size_t(inBuf[size_t(c) | 0x0201]) << 8)
-                 | inBuf[size_t(c) | 0x0200];
-          c = inBuf[size_t(c) | 0x0101] >> 1;
-        }
+      size_t  offs = 0;
+      if (c & 0x80) {
+        if (!(i & 1))
+          c = c & 0x7F;
+        offs = (size_t(inBuf[size_t(c) | 0x0200]) << 8)
+               | inBuf[size_t(c) | 0x0100];
+        c = inBuf[size_t(c)] >> 1;
       }
       else {
         if (p >= inBuf.size())
           errorMessage("unexpected end of data");
         offs = inBuf[p];
         p++;
-        if (!(c < 0x40 && i == 3)) {
+        if (!(c < 0x40 && i == 6)) {
           if (p >= inBuf.size())
             errorMessage("unexpected end of data");
           offs = offs | (size_t(inBuf[p]) << 8);
           p++;
         }
       }
-      if (c == 0x40 && i == 0)
-        break;
       if (c & 0x40) {
-        if (offs < (loadAddr + 0x0310))
+        if (offs < ((loadAddr & 0xFF00) + envOffs))
           errorMessage("invalid envelope data offset");
-        offs = offs - loadAddr;
+        offs = offs - ((loadAddr & 0xFF00) + envOffs);
       }
-      for (size_t len = (c & 0x3F) + 1; len-- > 0; n++) {
-        if (i == 0)
-          outBuf.resize(outBuf.size() + 16, 0);
-        size_t  r0 = (i < 4 ? (i << 1) : (i + 4));
-        size_t  r1 = (i < 4 ? (r0 + 1) : (r0 + 4));
-        unsigned char   v0 = (unsigned char) (offs & 0xFF);
-        unsigned char   v1 = (unsigned char) (offs >> 8);
-        if (c & 0x40) {
-          if ((offs + 1) >= inBuf.size())
-            errorMessage("unexpected end of data");
-          v0 = inBuf[offs];
-          v1 = inBuf[offs + 1];
-          offs = offs + 2;
-        }
-        if (i == 3)
-          v1 = 0;
-        outBuf[(n << 4) | r0] = v0;
-        outBuf[(n << 4) | r1] = v1;
+      envTimers[i] = c;
+      envPtrs[i] = offs;
+    }
+    else {
+      envTimers[i]--;
+    }
+    if (i == 0)
+      outBuf.resize(outBuf.size() + 16, 0);
+    unsigned char l = (unsigned char) (envPtrs[i] & 0xFF);
+    unsigned char h = (unsigned char) (envPtrs[i] >> 8);
+    if (envTimers[i] & 0x40) {
+      if (!(loadAddr & loadAddrNIFlag)) {
+        if ((envPtrs[i] + 1) >= envData.size())
+          errorMessage("invalid envelope data offset");
+        l = envData[envPtrs[i]];
+        h = envData[envPtrs[i] + 1];
+        envPtrs[i] = envPtrs[i] + 2;
       }
+      else {
+        if (envPtrs[i] >= (envData.size() >> 1))
+          errorMessage("invalid envelope data offset");
+        l = envData[envPtrs[i]];
+        h = envData[envPtrs[i] + (envData.size() >> 1)];
+        envPtrs[i] = envPtrs[i] + 1;
+      }
+    }
+    if (!(i & 1)) {
+      outBuf[outBuf.size() + i - 16] = l;
+      if (i != 6)
+        outBuf[outBuf.size() + i - 15] = h;
+    }
+    else {
+      outBuf[outBuf.size() + (i >> 1) - 8] = l;
+      outBuf[outBuf.size() + (i >> 1) - 4] = h;
     }
   }
 }
@@ -791,12 +868,13 @@ static void parseCommandLine(int argc, char **argv,
 {
   if (argc < 3 || argc > 6) {
     std::fprintf(stderr, "Usage: %s INFILE.DAV OUTFILE "
-                         "[LOADADDR[:d|n|dn] [MAXLEN1 [f|h|z]]]\n", argv[0]);
+                         "[LOADADDR[:d|n|s] [MAXLEN1 [f|h|z]]]\n", argv[0]);
     std::fprintf(stderr,
                  "    LOADADDR    load address of output file "
                  "(default: 0x%04X)\n", (unsigned int) loadAddr);
     std::fprintf(stderr, "    LOADADDR:d  differential envelope format\n");
     std::fprintf(stderr, "    LOADADDR:n  non-interleaved envelope format\n");
+    std::fprintf(stderr, "    LOADADDR:s  single track format\n");
     std::fprintf(stderr,
                  "    MAXLEN1     initial maximum envelope length (2..64) "
                  "(default: %d),\n", int(maxLen1));
@@ -831,6 +909,9 @@ static void parseCommandLine(int argc, char **argv,
           break;
         case 'N':
           loadAddr |= loadAddrNIFlag;
+          break;
+        case 'S':
+          loadAddr |= loadAddr1TrkFlag;
           break;
         default:
           errorMessage("invalid load address format flags");
@@ -889,7 +970,7 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "MAXLEN1 = %2d (best: %2d, file size: %5u):\n",
                      int(maxLen1), int(bestMaxLen1),
                      (unsigned int) outBuf.size());
-        convertFile(tmpBuf, inBuf, loadAddr & 0xFF00, maxLen1);
+        convertFile(tmpBuf, inBuf, loadAddr, maxLen1);
         if (tmpBuf.size() <= outBuf.size() || outBuf.size() < 1) {
           bestMaxLen1 = maxLen1;
           outBuf.clear();
@@ -898,11 +979,11 @@ int main(int argc, char **argv)
       }
     }
     else {
-      convertFile(outBuf, inBuf, loadAddr & 0xFF00, maxLen1);
+      convertFile(outBuf, inBuf, loadAddr, maxLen1);
     }
     try {
       std::vector< unsigned char >  tmpBuf;
-      decodeFile(tmpBuf, outBuf, loadAddr & 0xFF00);
+      decodeFile(tmpBuf, outBuf, loadAddr);
       if (tmpBuf.size() != (nFrames * 16))
         errorMessage("data size does not match input");
       for (size_t i = 0; i < 8; i++) {
@@ -919,29 +1000,6 @@ int main(int argc, char **argv)
     catch (...) {
       std::fprintf(stderr, " *** internal error: verifying output failed:\n");
       throw;
-    }
-    {
-      size_t  envSize = ((size_t(outBuf[0x0301]) << 8) | outBuf[0x0300])
-                        - ((loadAddr & 0xFF00) + 0x0310);
-      if (loadAddr & loadAddrDiffFlag) {
-        unsigned char prv0 = 0;
-        unsigned char prv1 = 0;
-        for (size_t i = 0x0310; i < (envSize + 0x0310); i++) {
-          unsigned char&  prv = (!(i & 1) ? prv0 : prv1);
-          unsigned char   tmp = (outBuf[i] - prv) & 0xFF;
-          prv = outBuf[i];
-          outBuf[i] = tmp;
-        }
-      }
-      if (loadAddr & loadAddrNIFlag) {
-        std::vector< unsigned char >  tmpBuf(envSize, 0);
-        for (size_t i = 0; i < envSize; i = i + 2)
-          tmpBuf[i >> 1] = outBuf[i + 0x0310];
-        for (size_t i = 0; i < envSize; i = i + 2)
-          tmpBuf[(envSize + i) >> 1] = outBuf[i + 0x0311];
-        for (size_t i = 0; i < envSize; i++)
-          outBuf[i + 0x0310] = tmpBuf[i];
-      }
     }
     std::FILE *f = std::fopen(argv[2], "wb");
     if (!f)
