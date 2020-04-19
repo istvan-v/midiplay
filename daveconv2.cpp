@@ -323,7 +323,7 @@ void RadixTree::clear()
 
 static void optimizeEnvelopes(std::vector< unsigned short >& envBuf,
                               std::vector< int >& envUsed,
-                              const std::vector< unsigned int >& len,
+                              const std::vector< unsigned char >& len,
                               const std::vector< unsigned int >& offs)
 {
   std::vector< unsigned short > tmpEnv(envBuf);
@@ -353,7 +353,7 @@ static void createEnvTables(
     std::map< unsigned int, unsigned char >& npMapF,
     std::map< unsigned int, unsigned char >& npMapV,
     const std::vector< unsigned short >& envBuf,
-    const std::vector< unsigned int >& len,
+    const std::vector< unsigned char >& len,
     const std::vector< unsigned int >& offs)
 {
   size_t  envOffs = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
@@ -438,10 +438,10 @@ static void createEnvTables(
 // ----------------------------------------------------------------------------
 
 static size_t optimizeTrackData(
-    std::vector< unsigned int >& len,
+    std::vector< unsigned char >& len,
     std::vector< unsigned int >& offs, size_t maxLen,
     const std::vector< unsigned short >& inBuf,
-    const std::vector< unsigned short >& envBuf,
+    const std::vector< unsigned short >& envBuf, RadixTree& envTree,
     const std::vector< int >& envUsed,
     const std::map< unsigned int, unsigned char >& npMapF,
     const std::map< unsigned int, unsigned char >& npMapV)
@@ -450,14 +450,21 @@ static size_t optimizeTrackData(
   std::vector< unsigned int > offsTable(maxLen * sizeof(unsigned short), 0U);
   std::vector< unsigned int > byteCnts(nFrames * 8 + 1, 0);
   std::vector< unsigned int > byteCntsNoEnv(nFrames * 8 + 1, 0);
-  RadixTree   envTree;
-  for (size_t i = envBuf.size(); i-- > 0; ) {
-    size_t  n = envBuf.size() - i;
-    if (n > maxLen)
-      n = maxLen;
-    envTree.addString(
-        reinterpret_cast< const unsigned char * >(&(envBuf.front())),
-        i * sizeof(unsigned short), n * sizeof(unsigned short));
+  std::vector< unsigned char >  rleLengths(nFrames * 8, 1);
+  if (nFrames > 1) {
+    for (size_t i = nFrames * 8 - 1; i-- > 0; ) {
+      size_t  n = (nFrames * 8 - i) % nFrames;
+      if (!n)
+        n = nFrames;
+      if (n > lengthMaxValue)
+        n = lengthMaxValue;
+      if (inBuf[i] != inBuf[i + 1])
+        rleLengths[i] = 1;
+      else if (rleLengths[i + 1] < (unsigned char) n)
+        rleLengths[i] = rleLengths[i + 1] + 1;
+      else
+        rleLengths[i] = (unsigned char) n;
+    }
   }
   for (size_t i = nFrames * 8; i-- > 0; ) {
     const std::map< unsigned int, unsigned char >&  npMap =
@@ -471,15 +478,15 @@ static size_t optimizeTrackData(
     size_t  bestSizeNoEnv = 0x7FFFFFFF;
     size_t  bestLen = 1;
     size_t  bestOffs = rleOffsetFlag;
-    for (size_t j = 1; j <= n; j++) {
-      if (inBuf[i + j - 1] != inBuf[i])
-        break;
+    for (size_t j = rleLengths[i]; j >= 1; j--) {
       size_t  nBytes = byteCnts[i + j] + 1;
+      if (nBytes >= bestSize)
+        continue;
       if (npMap.find((unsigned int) (((rleOffsetFlag | inBuf[i]) << 8) | j))
           == npMap.end()) {
         nBytes = nBytes + 2 - size_t(i >= (nFrames * 3) && i < (nFrames * 4));
       }
-      if (nBytes <= bestSize) {
+      if (nBytes < bestSize) {
         bestSize = nBytes;
         bestSizeNoEnv = nBytes + byteCntsNoEnv[i + j] - byteCnts[i + j];
         bestLen = j;
@@ -505,21 +512,24 @@ static size_t optimizeTrackData(
         else
           envBytes = j * 2;
       }
-      envBytes += (byteCnts[i + j] - byteCntsNoEnv[i + j]);
-      size_t  nBytes = byteCntsNoEnv[i + j] + 1;
+      size_t  nBytes = envBytes + byteCnts[i + j] + 1;
+      if (nBytes > bestSize)
+        continue;
       if (npMap.find((unsigned int) ((k << 8) | j)) == npMap.end())
         nBytes = nBytes + 2;
-      if ((nBytes + envBytes) < bestSize ||
-          ((nBytes + envBytes) == bestSize && nBytes > bestSizeNoEnv)) {
-        bestSize = nBytes + envBytes;
-        bestSizeNoEnv = nBytes;
+      size_t  nBytesNoEnv =
+          nBytes - (envBytes + byteCnts[i + j] - byteCntsNoEnv[i + j]);
+      if (nBytes < bestSize ||
+          (nBytes == bestSize && nBytesNoEnv > bestSizeNoEnv)) {
+        bestSize = nBytes;
+        bestSizeNoEnv = nBytesNoEnv;
         bestLen = j;
         bestOffs = k;
       }
     }
     byteCnts[i] = bestSize;
     byteCntsNoEnv[i] = bestSizeNoEnv;
-    len[i] = (unsigned int) bestLen;
+    len[i] = (unsigned char) bestLen;
     offs[i] = (unsigned int) bestOffs;
   }
   return (byteCntsNoEnv[0] + 1);
@@ -527,7 +537,7 @@ static size_t optimizeTrackData(
 
 static void writeTrackData(
     std::vector< unsigned char >& outBuf, size_t loadAddr,
-    unsigned int len, unsigned int offs, bool isChn3Freq,
+    unsigned char len, unsigned int offs, bool isChn3Freq,
     const std::map< unsigned int, unsigned char >& npMap)
 {
   std::map< unsigned int, unsigned char >::const_iterator i =
@@ -554,7 +564,7 @@ static void writeTrackData(
 
 static void writeTrackData(
     std::vector< unsigned char >& outBuf, size_t loadAddr,
-    const std::vector< unsigned int >& len,
+    const std::vector< unsigned char >& len,
     const std::vector< unsigned int >& offs,
     const std::map< unsigned int, unsigned char >& npMapF,
     const std::map< unsigned int, unsigned char >& npMapV)
@@ -703,52 +713,67 @@ static void convertFile(std::vector< unsigned char >& outBuf,
   size_t  nFrames = inBuf.size() >> 3;
   std::vector< unsigned short > envBuf(inBuf);
   std::vector< int >  envUsed;
-  std::vector< unsigned int >   len(nFrames * 8);
+  std::vector< unsigned char >  len(nFrames * 8);
   std::vector< unsigned int >   offs(nFrames * 8);
   std::map< unsigned int, unsigned char > npMapF;
   std::map< unsigned int, unsigned char > npMapV;
-  size_t  prvTotalSize = 0x7FFFFFFF;
+  size_t  bestSize = 0x7FFFFFFF;
+  bool    finalPass = false;
   for (size_t passCnt = 1; true; passCnt++) {
     size_t  maxLen = passCnt * maxLen1;
-    if (maxLen > lengthMaxValue)
+    if (maxLen > lengthMaxValue || finalPass)
       maxLen = lengthMaxValue;
-    if (passCnt > 1)
+    if (passCnt > 1 && !finalPass)
       optimizeEnvelopes(envBuf, envUsed, len, offs);
+    RadixTree   envTree;
+    for (size_t i = envBuf.size(); i-- > 0; ) {
+      size_t  n = envBuf.size() - i;
+      if (n > maxLen)
+        n = maxLen;
+      envTree.addString(
+          reinterpret_cast< const unsigned char * >(&(envBuf.front())),
+          i * sizeof(unsigned short), n * sizeof(unsigned short));
+    }
     size_t  envSize = envBuf.size() << 1;
-    if (passCnt > 1) {
-      outBuf.clear();
-      npMapF.clear();
-      npMapV.clear();
-      (void) optimizeTrackData(len, offs, maxLen, inBuf,
-                               envBuf, envUsed, npMapF, npMapV);
+    size_t  trkSize = 0;
+    size_t  totalSize = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
+    bool    finalPassNext = false;
+    if (finalPass) {
       createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
-    }
-    size_t  trkSize = optimizeTrackData(len, offs, maxLen, inBuf,
-                                        envBuf, envUsed, npMapF, npMapV);
-    size_t  totalSize = envSize + trkSize + 0x0310;
-    std::fprintf(stderr,
-                 "\rPass %2d: file size: %5u bytes, "
-                 "envelope data: %5u, track data: %5u  ",
-                 int(passCnt), (unsigned int) totalSize,
-                 (unsigned int) envSize, (unsigned int) trkSize);
-    if (totalSize < prvTotalSize) {
-      prvTotalSize = totalSize;
-    }
-    else {
-      createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
-      envSize = envBuf.size() << 1;
       envUsed.clear();
-      trkSize = optimizeTrackData(len, offs, maxLen, inBuf,
-                                  envBuf, envUsed, npMapF, npMapV);
+      trkSize = optimizeTrackData(len, offs, maxLen, inBuf, envBuf,
+                                  envTree, envUsed, npMapF, npMapV);
       writeTrackData(outBuf, loadAddr, len, offs, npMapF, npMapV);
       totalSize = outBuf.size();
-      std::fprintf(stderr,
-                   "\rPass %2d: file size: %5u bytes, "
-                   "envelope data: %5u, track data: %5u  \n",
-                   int(passCnt + 1), (unsigned int) totalSize,
-                   (unsigned int) envSize, (unsigned int) trkSize);
-      break;
     }
+    else {
+      if (passCnt > 1) {
+        outBuf.clear();
+        npMapF.clear();
+        npMapV.clear();
+        (void) optimizeTrackData(len, offs, maxLen, inBuf, envBuf,
+                                 envTree, envUsed, npMapF, npMapV);
+        createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
+      }
+      trkSize = optimizeTrackData(len, offs, maxLen, inBuf, envBuf,
+                                  envTree, envUsed, npMapF, npMapV);
+      totalSize = totalSize + envSize + trkSize;
+      finalPassNext = (totalSize >= bestSize);
+      if (totalSize < bestSize)
+        bestSize = totalSize;
+    }
+    std::fprintf(stderr,
+                 "\rPass %2d: file size:%6u bytes, "
+                 "envelope data: %5u, track data: %5u %c",
+                 int(passCnt), (unsigned int) totalSize,
+                 (unsigned int) envSize, (unsigned int) trkSize,
+                 (!finalPass ? ' ' : '\n'));
+    if (finalPassNext) {
+      finalPass = true;
+      continue;
+    }
+    if (finalPass)
+      break;
   }
 }
 
