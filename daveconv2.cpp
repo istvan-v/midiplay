@@ -750,6 +750,7 @@ static void convertFile(std::vector< unsigned char >& outBuf,
   std::vector< unsigned int >   offs(nFrames * 8);
   std::map< unsigned int, unsigned char > npMapF;
   std::map< unsigned int, unsigned char > npMapV;
+  RadixTree   envTree;
   size_t  bestSize = 0x7FFFFFFF;
   bool    finalPass = false;
   for (size_t passCnt = 1; true; passCnt++) {
@@ -758,7 +759,7 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       maxLen = lengthMaxValue;
     if (passCnt > 1 && !finalPass)
       optimizeEnvelopes(envBuf, envUsed, len, offs);
-    RadixTree   envTree;
+    envTree.clear();
     for (size_t i = envBuf.size(); i-- > 0; ) {
       size_t  n = envBuf.size() - i;
       if (n > maxLen)
@@ -780,7 +781,27 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       totalSize = outBuf.size();
     }
     else {
-      if (passCnt > 1) {
+      if (passCnt == 1 && maxLen >= 10) {
+        for (size_t k = 0; k < 4; k++) {
+          (void) optimizeTrackData(len, offs, maxLen, inBuf, envBuf,
+                                   envTree, envUsed, npMapF, npMapV);
+          envUsed.clear();
+          envUsed.resize(envBuf.size() + 1, 0);
+          for (size_t i = 0; i < (nFrames * 8); i = i + len[i]) {
+            if (offs[i] & rleOffsetFlag)
+              continue;
+            for (size_t j = 0; j < len[i]; j++)
+              envUsed[offs[i] + j]++;
+          }
+          int     n = 0;
+          for (size_t i = 0; i < envUsed.size(); i++) {
+            int     tmp = envUsed[i];
+            envUsed[i] = n;
+            n = n + tmp;
+          }
+        }
+      }
+      if (passCnt > 1 || maxLen >= 10) {
         outBuf.clear();
         npMapF.clear();
         npMapV.clear();
