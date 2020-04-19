@@ -31,6 +31,7 @@ static const size_t rleOffsetFlag = 0x00400000;
 static const size_t loadAddrDiffFlag = 0x0001;
 static const size_t loadAddrNIFlag = 0x0002;
 static const size_t loadAddr1TrkFlag = 0x0004;
+static const size_t loadAddrDecodeFlag = 0x0008;
 
 static void errorMessage(const char *fmt, ...)
 {
@@ -614,21 +615,53 @@ static void writeTrackData(
 
 // ----------------------------------------------------------------------------
 
+static size_t loadInputFile(std::vector< unsigned char >& inBuf,
+                            const char *fileName,
+                            size_t minSize = 0, size_t maxSize = 0x7FFFFFFF)
+{
+  inBuf.clear();
+  std::FILE *f = std::fopen(fileName, "rb");
+  if (!f)
+    errorMessage("error opening input file '%s'\n", fileName);
+  int     c;
+  while ((c = std::fgetc(f)) != EOF) {
+    inBuf.push_back((unsigned char) (c & 0xFF));
+    if (inBuf.size() > maxSize)
+      break;
+  }
+  std::fclose(f);
+  if (inBuf.size() < minSize || inBuf.size() > maxSize)
+    errorMessage("invalid input file size");
+  return inBuf.size();
+}
+
+static void writeOutputFile(const std::vector< unsigned char >& outBuf,
+                            const char *fileName)
+{
+  std::FILE *f = std::fopen(fileName, "wb");
+  if (!f)
+    errorMessage("error opening output file '%s'", fileName);
+  try {
+    if (std::fwrite(&(outBuf.front()), sizeof(unsigned char), outBuf.size(),
+                    f) != outBuf.size() ||
+        std::fflush(f) != 0) {
+      errorMessage("error writing output file '%s'", fileName);
+    }
+    std::fclose(f);
+    f = (std::FILE *) 0;
+  }
+  catch (...) {
+    std::fclose(f);
+    throw;
+  }
+}
+
 static size_t loadInputFile(std::vector< unsigned short >& inBuf,
                             const char *fileName, int zeroVolMode)
 {
   inBuf.clear();
   std::vector< unsigned char >  tmpBuf;
-  {
-    std::FILE *f = std::fopen(fileName, "rb");
-    if (!f)
-      errorMessage("error opening input file '%s'\n", fileName);
-    int     c;
-    while ((c = std::fgetc(f)) != EOF)
-      tmpBuf.push_back((unsigned char) (c & 0xFF));
-    std::fclose(f);
-  }
-  size_t  nFrames = tmpBuf.size() >> 4;
+  size_t  nFrames = loadInputFile(tmpBuf, fileName, 16, rleOffsetFlag * 2) >> 4;
   tmpBuf.resize(nFrames * 16);
   inBuf.resize(nFrames * 8, 0);
   for (size_t i = 0; i < tmpBuf.size(); i = i + 16) {
@@ -893,13 +926,14 @@ static void parseCommandLine(int argc, char **argv,
 {
   if (argc < 3 || argc > 6) {
     std::fprintf(stderr, "Usage: %s INFILE.DAV OUTFILE "
-                         "[LOADADDR[:d|n|s] [MAXLEN1 [f|h|z]]]\n", argv[0]);
+                         "[LOADADDR[:FLAGS] [MAXLEN1 [f|h|z]]]\n", argv[0]);
     std::fprintf(stderr,
                  "    LOADADDR    load address of output file "
                  "(default: 0x%04X)\n", (unsigned int) loadAddr);
     std::fprintf(stderr, "    LOADADDR:d  differential envelope format\n");
     std::fprintf(stderr, "    LOADADDR:n  non-interleaved envelope format\n");
     std::fprintf(stderr, "    LOADADDR:s  single track format\n");
+    std::fprintf(stderr, "    LOADADDR:x  decode input file\n");
     std::fprintf(stderr,
                  "    MAXLEN1     initial maximum envelope length (2..64) "
                  "(default: %d),\n", int(maxLen1));
@@ -937,6 +971,9 @@ static void parseCommandLine(int argc, char **argv,
           break;
         case 'S':
           loadAddr |= loadAddr1TrkFlag;
+          break;
+        case 'X':
+          loadAddr |= loadAddrDecodeFlag;
           break;
         default:
           errorMessage("invalid load address format flags");
@@ -982,6 +1019,14 @@ int main(int argc, char **argv)
     {
       int     zeroVolMode = 0;
       parseCommandLine(argc, argv, loadAddr, maxLen1, zeroVolMode);
+      if (loadAddr & loadAddrDecodeFlag) {
+        std::vector< unsigned char >  inBuf2;
+        std::vector< unsigned char >  outBuf;
+        loadInputFile(inBuf2, argv[1], 0x0302, 0xFFFF);
+        decodeFile(outBuf, inBuf2, loadAddr);
+        writeOutputFile(outBuf, argv[2]);
+        return 0;
+      }
       nFrames = loadInputFile(inBuf, argv[1], zeroVolMode);
       if (nFrames < 1)
         errorMessage("empty input file");
@@ -1026,22 +1071,7 @@ int main(int argc, char **argv)
       std::fprintf(stderr, " *** internal error: verifying output failed:\n");
       throw;
     }
-    std::FILE *f = std::fopen(argv[2], "wb");
-    if (!f)
-      errorMessage("error opening output file '%s'", argv[2]);
-    try {
-      if (std::fwrite(&(outBuf.front()), sizeof(unsigned char), outBuf.size(),
-                      f) != outBuf.size() ||
-          std::fflush(f) != 0) {
-        errorMessage("error writing output file '%s'", argv[2]);
-      }
-      std::fclose(f);
-      f = (std::FILE *) 0;
-    }
-    catch (...) {
-      std::fclose(f);
-      throw;
-    }
+    writeOutputFile(outBuf, argv[2]);
   }
   catch (std::exception& e) {
     std::fprintf(stderr, " *** %s: %s\n", argv[0], e.what());
