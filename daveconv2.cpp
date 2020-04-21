@@ -58,44 +58,45 @@ static void errorMessage(const char *fmt, ...)
 #  define EP128EMU_UNLIKELY(x__)  x__
 #endif
 
-class RadixTree {
+template < typename T > class RadixTree {
  protected:
-  friend class LZSearchTable;
   // Each node has a size of 3 elements in the buffer:
   //        0:  length of the sub-string at this node
   //        1:  start position of the full sequence in the input data
   //        2:  buffer position of table of child nodes (0: none) for the
   //            2 most significant bits of the next character.
-  //            A chain of 4 such tables leads to the next node, each one
+  //            A chain of such tables leads to the next node, each one
   //            contains 4 buffer positions for the next 2 bits of the
   //            character
   // The first four elements of the buffer are unused (always zero)
   std::vector< unsigned int > buf;
-  unsigned int  bufPos;
   // --------
-  EP128EMU_INLINE unsigned int findNextNode(unsigned char c);
-  void allocNode(unsigned char c);
+  EP128EMU_INLINE unsigned int findNextNode(T c, unsigned int bufPos) const;
+  unsigned int allocNode(T c, unsigned int bufPos);
   // returns the matching prefix length between 'p1' and 'p2'
   static EP128EMU_INLINE unsigned int compareStrings(
-      const unsigned char *p1, size_t l1, const unsigned char *p2, size_t l2);
+      const T *p1, size_t l1, const T *p2, size_t l2);
  public:
   RadixTree(size_t bufSize_ = 0x00100000);
   ~RadixTree();
   // writes the shortest offsets of matches found to offsTable[0..maxLen-1],
   // and returns the maximum length
-  size_t findMatches(unsigned int *offsTable,
-                     const unsigned char *inBuf,
-                     const unsigned char *s, size_t maxLen);
+  size_t findMatches(unsigned int *offsTable, const T *inBuf,
+                     const T *s, size_t maxLen) const;
   // returns the position of 's' in inBuf, or -1 if not found
-  long findString(const unsigned char *inBuf,
-                  const unsigned char *s, size_t len);
-  void addString(const unsigned char *inBuf, size_t inBufPos, size_t len);
+  long findString(const T *inBuf, const T *s, size_t len) const;
+  void addString(const T *inBuf, size_t inBufPos, size_t len);
   void clear();
 };
 
-EP128EMU_INLINE unsigned int RadixTree::findNextNode(unsigned char c)
+template < typename T > EP128EMU_INLINE
+    unsigned int RadixTree< T >::findNextNode(T c, unsigned int bufPos) const
 {
   unsigned int  nextPos = buf[bufPos + 2U];
+  for (unsigned char b = (unsigned char) (sizeof(T) * 8 - 2);
+       b >= 8; b = b - 2) {
+    nextPos = buf[nextPos + ((c >> b) & 3)];
+  }
   nextPos = buf[nextPos + ((c >> 6) & 3)];
   nextPos = buf[nextPos + ((c >> 4) & 3)];
   nextPos = buf[nextPos + ((c >> 2) & 3)];
@@ -103,8 +104,9 @@ EP128EMU_INLINE unsigned int RadixTree::findNextNode(unsigned char c)
   return nextPos;
 }
 
-EP128EMU_INLINE unsigned int RadixTree::compareStrings(
-    const unsigned char *p1, size_t l1, const unsigned char *p2, size_t l2)
+template < typename T > EP128EMU_INLINE
+    unsigned int RadixTree< T >::compareStrings(
+        const T *p1, size_t l1, const T *p2, size_t l2)
 {
   size_t  l = (l1 < l2 ? l1 : l2);
   if (l < 1 || p1[0] != p2[0])
@@ -112,7 +114,7 @@ EP128EMU_INLINE unsigned int RadixTree::compareStrings(
   if (l < 2 || p1[1] != p2[1])
     return 1U;
   if (l >= 8) {
-    if (std::memcmp(p1 + 2, p2 + 2, l - 2) == 0)
+    if (std::memcmp(p1 + 2, p2 + 2, (l - 2) * sizeof(T)) == 0)
       return l;
   }
   size_t  i = 2;
@@ -129,24 +131,23 @@ EP128EMU_INLINE unsigned int RadixTree::compareStrings(
   return (unsigned int) l;
 }
 
-RadixTree::RadixTree(size_t bufSize_)
-  : bufPos(4U)
+template < typename T > RadixTree< T >::RadixTree(size_t bufSize_)
 {
   buf.reserve(bufSize_);
   buf.resize(7, 0U);
 }
 
-RadixTree::~RadixTree()
+template < typename T > RadixTree< T >::~RadixTree()
 {
 }
 
-size_t RadixTree::findMatches(unsigned int *offsTable,
-                              const unsigned char *inBuf,
-                              const unsigned char *s, size_t maxLen)
+template < typename T >
+    size_t RadixTree< T >::findMatches(unsigned int *offsTable, const T *inBuf,
+                                       const T *s, size_t maxLen) const
 {
-  bufPos = 4U;
+  unsigned int  bufPos = 4U;
   if (buf[bufPos] == 0U) {
-    bufPos = findNextNode(*s);
+    bufPos = findNextNode(*s, bufPos);
     if (!bufPos)
       return 0;
   }
@@ -169,20 +170,21 @@ size_t RadixTree::findMatches(unsigned int *offsTable,
           return len;
         break;
       }
-      bufPos = findNextNode(s[len]);
+      bufPos = findNextNode(s[len], bufPos);
     } while (bufPos && buf[bufPos + 1U] == matchPos);
   } while (bufPos);
   return len;
 }
 
-long RadixTree::findString(const unsigned char *inBuf,
-                           const unsigned char *s, size_t len)
+template < typename T >
+    long RadixTree< T >::findString(const T *inBuf,
+                                    const T *s, size_t len) const
 {
   if (len < 1)
     return 0L;
-  bufPos = 4U;
+  unsigned int  bufPos = 4U;
   if (buf[bufPos] == 0U)
-    bufPos = findNextNode(*s);
+    bufPos = findNextNode(*s, bufPos);
   else if (*s != inBuf[buf[bufPos + 1U]])
     return -1L;
   for (size_t i = 0; bufPos != 0U; ) {
@@ -195,15 +197,16 @@ long RadixTree::findString(const unsigned char *inBuf,
       return long(buf[bufPos + 1U]);
     if (!l)
       return -1L;
-    bufPos = findNextNode(s[i]);
+    bufPos = findNextNode(s[i], bufPos);
   }
   return -1L;
 }
 
-void RadixTree::allocNode(unsigned char c)
+template < typename T >
+    unsigned int RadixTree< T >::allocNode(T c, unsigned int bufPos)
 {
   unsigned int  nextPos = buf[bufPos + 2U];
-  unsigned char nBits = 6;
+  unsigned char nBits = (unsigned char) (sizeof(T) * 8 - 2);
   unsigned int  bufSize = (unsigned int) buf.size();
   if (nextPos) {
     unsigned int  nextPos_;
@@ -228,20 +231,20 @@ void RadixTree::allocNode(unsigned char c)
     nextPos_ = nextPos_ + 4U;
     nBits = nBits - 2;
   } while ((signed char) nBits >= 0);
-  bufPos = nextPos;
+  return nextPos;
 }
 
-void RadixTree::addString(const unsigned char *inBuf, size_t inBufPos,
-                          size_t len)
+template < typename T >
+    void RadixTree< T >::addString(const T *inBuf, size_t inBufPos, size_t len)
 {
-  bufPos = 4U;
+  unsigned int  bufPos = 4U;
   if (buf[bufPos] == 0U) {
-    unsigned char c = inBuf[inBufPos];
-    unsigned int  nextPos = findNextNode(c);
+    T       c = inBuf[inBufPos];
+    unsigned int  nextPos = findNextNode(c, bufPos);
     if (!nextPos) {
       // empty tree or new leaf node
       if (buf[bufPos + 2U])
-        allocNode(c);
+        bufPos = allocNode(c, bufPos);
       buf[bufPos] = (unsigned int) len;
       buf[bufPos + 1U] = (unsigned int) inBufPos;
       buf[bufPos + 2U] = 0U;
@@ -256,9 +259,9 @@ void RadixTree::addString(const unsigned char *inBuf, size_t inBufPos,
         buf[bufPos + 1U] = (unsigned int) inBufPos;
         if (++n >= len)
           return;
-        unsigned int  nextPos = findNextNode(inBuf[inBufPos + n]);
+        unsigned int  nextPos = findNextNode(inBuf[inBufPos + n], bufPos);
         if (!nextPos) {
-          allocNode(inBuf[inBufPos + n]);
+          bufPos = allocNode(inBuf[inBufPos + n], bufPos);
           buf[bufPos] = (unsigned int) (len - n);
           buf[bufPos + 1U] = (unsigned int) inBufPos;
           return;
@@ -276,13 +279,13 @@ void RadixTree::addString(const unsigned char *inBuf, size_t inBufPos,
       buf[bufPos + 1U] = (unsigned int) inBufPos;
       if (n >= len)
         break;
-      unsigned char c = inBuf[inBufPos + n];
-      unsigned int  nextPos = findNextNode(c);
+      T       c = inBuf[inBufPos + n];
+      unsigned int  nextPos = findNextNode(c, bufPos);
       if (nextPos) {
         bufPos = nextPos;
         continue;
       }
-      allocNode(c);
+      bufPos = allocNode(c, bufPos);
       if (!buf[bufPos]) {
         // new leaf node
         buf[bufPos] = (unsigned int) (len - n);
@@ -295,7 +298,7 @@ void RadixTree::addString(const unsigned char *inBuf, size_t inBufPos,
       unsigned int  savedBufPos = bufPos;
       unsigned int  savedChildrenPos = buf[bufPos + 2U];
       buf[bufPos + 2U] = 0U;
-      allocNode(inBuf[buf[bufPos + 1U] + (unsigned int) n]);
+      bufPos = allocNode(inBuf[buf[bufPos + 1U] + (unsigned int) n], bufPos);
       buf[bufPos] = buf[savedBufPos] - l;
       buf[bufPos + 1U] = buf[savedBufPos + 1U];
       buf[bufPos + 2U] = savedChildrenPos;
@@ -304,7 +307,7 @@ void RadixTree::addString(const unsigned char *inBuf, size_t inBufPos,
       if (n < len) {
         // create new leaf node
         bufPos = savedBufPos;
-        allocNode(inBuf[inBufPos + n]);
+        bufPos = allocNode(inBuf[inBufPos + n], bufPos);
         buf[bufPos] = (unsigned int) (len - n);
         buf[bufPos + 1U] = (unsigned int) inBufPos;
       }
@@ -313,11 +316,10 @@ void RadixTree::addString(const unsigned char *inBuf, size_t inBufPos,
   }
 }
 
-void RadixTree::clear()
+template < typename T > void RadixTree< T >::clear()
 {
   buf.clear();
   buf.resize(7, 0U);
-  bufPos = 4U;
 }
 
 // ----------------------------------------------------------------------------
@@ -746,7 +748,7 @@ static void convertFile(std::vector< unsigned char >& outBuf,
   std::map< unsigned int, unsigned char > npMapF;
   std::map< unsigned int, unsigned char > npMapV;
   std::vector< unsigned int >   offsTable(nFrames * 8, 0U);
-  RadixTree   envTree;
+  RadixTree< unsigned short >   envTree;
   size_t  prvEnvSize = 0x7FFFFFFF;
   bool    finalPass = false;
   for (size_t passCnt = 1; true; passCnt++) {
@@ -760,9 +762,7 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       size_t  n = envBuf.size() - i;
       if (n > maxLen)
         n = maxLen;
-      envTree.addString(
-          reinterpret_cast< const unsigned char * >(&(envBuf.front())),
-          i * sizeof(unsigned short), n * sizeof(unsigned short));
+      envTree.addString(&(envBuf.front()), i, n);
     }
     offsTable.resize(nFrames * 8);
     for (size_t i = 0; i < (nFrames * 8); i++) {
@@ -771,21 +771,16 @@ static void convertFile(std::vector< unsigned char >& outBuf,
         n = nFrames;
       if (n > maxLen)
         n = maxLen;
-      unsigned int  tmpBuf[lengthMaxValue * sizeof(unsigned short)];
-      size_t  l =
-          envTree.findMatches(
-              &(tmpBuf[0]),
-              reinterpret_cast< const unsigned char * >(&(envBuf.front())),
-              reinterpret_cast< const unsigned char * >(&(inBuf.front()))
-              + (i * sizeof(unsigned short)), n * sizeof(unsigned short))
-          / sizeof(unsigned short);
+      unsigned int  tmpBuf[lengthMaxValue];
+      size_t  l = envTree.findMatches(&(tmpBuf[0]), &(envBuf.front()),
+                                      &(inBuf.front()) + i, n);
       unsigned int  prvOffs = 0xFFFFFFFFU;
       offsTable.push_back(0U);
       for ( ; l >= 2; l--) {
-        unsigned int  d = tmpBuf[l * sizeof(unsigned short) - 1];
+        unsigned int  d = tmpBuf[l - 1];
         if (d != prvOffs) {
           prvOffs = d;
-          offsTable.push_back(d / (unsigned int) sizeof(unsigned short));
+          offsTable.push_back(d);
           offsTable.push_back((unsigned int) l);
         }
       }
