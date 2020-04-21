@@ -327,18 +327,45 @@ template < typename T > void RadixTree< T >::clear()
 static void optimizeEnvelopes(std::vector< unsigned short >& envBuf,
                               std::vector< int >& envUsed,
                               const std::vector< unsigned char >& len,
-                              const std::vector< unsigned int >& offs)
+                              const std::vector< unsigned int >& offs,
+                              RadixTree< unsigned short > *envTree =
+                                  (RadixTree< unsigned short > *) 0)
 {
   std::vector< unsigned short > tmpEnv(envBuf);
   envBuf.clear();
   envUsed.clear();
   std::vector< int >  tmpEnvUsed(tmpEnv.size(), 0);
   size_t  nFrames = len.size() >> 3;
+  if (envTree) {
+    envTree->clear();
+    for (size_t i = 0; i < (nFrames * 8); i = i + len[i]) {
+      if (offs[i] & rleOffsetFlag)
+        continue;
+      for (size_t j = 0; j < len[i]; j++)
+        tmpEnvUsed[offs[i] + j] = 1;
+    }
+    for (size_t i = 0; i < tmpEnvUsed.size(); i++) {
+      if (!tmpEnvUsed[i])
+        continue;
+      tmpEnvUsed[i] = 0;
+      size_t  l = 1;
+      while (l < lengthMaxValue &&
+             (i + l) < tmpEnvUsed.size() && tmpEnvUsed[i + l] != 0) {
+        l++;
+      }
+      envTree->addString(&(tmpEnv.front()), i, l);
+    }
+  }
   for (size_t i = 0; i < (nFrames * 8); i = i + len[i]) {
     if (offs[i] & rleOffsetFlag)
       continue;
+    size_t  k = offs[i];
+    if (envTree) {
+      k = size_t(envTree->findString(&(tmpEnv.front()),
+                                     &(tmpEnv.front()) + offs[i], len[i]));
+    }
     for (size_t j = 0; j < len[i]; j++)
-      tmpEnvUsed[offs[i] + j]++;
+      tmpEnvUsed[k + j]++;
   }
   int     n = 0;
   for (size_t i = 0; i < tmpEnvUsed.size(); i++) {
@@ -686,6 +713,8 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       optimizeEnvelopes(envBuf, envUsed, len, offs);
     size_t  envSize = envBuf.size() << 1;
     bool    finalPassNext = (envSize >= prvEnvSize);
+    if (finalPassNext)
+      optimizeEnvelopes(envBuf, envUsed, len, offs, &envTree);
     while (true) {
       envTree.clear();
       for (size_t i = envBuf.size(); i-- > 0; ) {
@@ -722,30 +751,26 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       optimizeEnvelopes(envBuf, envUsed, len, offs);
       envSize = envBuf.size() << 1;
     }
-    size_t  trkSize = 0;
-    size_t  totalSize = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
-    if (finalPass) {
+    size_t  trkSize = 0x7FFFFFFF;
+    if (finalPass)
       envUsed.clear();
-      for (size_t k = 0; k < 2; k++) {
+    outBuf.clear();
+    npMapF.clear();
+    npMapV.clear();
+    for (size_t k = 0; k < (!finalPass ? 3 : 8); k++) {
+      if (k > 0)
         createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
-        trkSize = optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
-                                    npMapF, npMapV);
-      }
-      writeTrackData(outBuf, loadAddr, len, offs, npMapF, npMapV);
-      totalSize = outBuf.size();
-    }
-    else {
-      outBuf.clear();
-      npMapF.clear();
-      npMapV.clear();
-      for (size_t k = 0; k < 2; k++) {
-        (void) optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
-                                 npMapF, npMapV);
-        createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
-      }
+      size_t  prvSize = trkSize;
       trkSize = optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
                                   npMapF, npMapV);
-      totalSize = totalSize + envSize + trkSize;
+      if (trkSize >= prvSize)
+        break;
+    }
+    size_t  totalSize =
+        envSize + trkSize + (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
+    if (finalPass) {
+      writeTrackData(outBuf, loadAddr, len, offs, npMapF, npMapV);
+      totalSize = outBuf.size();
     }
     prvEnvSize = envSize;
     std::fprintf(stderr,
