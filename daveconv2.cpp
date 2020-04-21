@@ -440,6 +440,59 @@ static void createEnvTables(
 
 // ----------------------------------------------------------------------------
 
+static size_t optimizeTrackDataP1(
+    std::vector< unsigned char >& len, std::vector< unsigned int >& offs,
+    const std::vector< unsigned short >& inBuf,
+    const std::vector< unsigned int >& offsTable)
+{
+  size_t  nFrames = inBuf.size() >> 3;
+  std::vector< unsigned int > byteCnts(nFrames * 8 + 1, 0);
+  size_t  rleLength = 1;
+  for (size_t i = nFrames * 8; i-- > 0; ) {
+    size_t  n = (nFrames * 8 - i) % nFrames;
+    if (!n)
+      n = nFrames;
+    if (n > lengthMaxValue)
+      n = lengthMaxValue;
+    if (n < 2 || inBuf[i] != inBuf[i + 1])
+      rleLength = 1;
+    else if (rleLength < n)
+      rleLength++;
+    size_t  bestSize = 0x7FFFFFFF;
+    size_t  bestLen = 1;
+    size_t  bestOffs = rleOffsetFlag;
+    for (size_t j = rleLength; j >= 1; j--) {
+      size_t  nBytes = byteCnts[i + j] + 3
+                       - size_t(i >= (nFrames * 3) && i < (nFrames * 4));
+      if (nBytes < bestSize) {
+        bestSize = nBytes;
+        bestLen = j;
+        bestOffs = rleOffsetFlag | inBuf[i];
+      }
+    }
+    const unsigned int  *p = &(offsTable.front()) + offsTable[i];
+    for (unsigned int j = 2; *p; p = p - 2) {
+      size_t  k = *(p - 1);
+      for ( ; j <= *p; j++) {
+        size_t  nBytes = byteCnts[i + j] + 3;
+        if (k >= i)
+          nBytes = nBytes + (j * 2);
+        else if ((k + j) > i)
+          nBytes = nBytes + ((k + j - i) * 2);
+        if (nBytes < bestSize) {
+          bestSize = nBytes;
+          bestLen = j;
+          bestOffs = k;
+        }
+      }
+    }
+    byteCnts[i] = bestSize;
+    len[i] = (unsigned char) bestLen;
+    offs[i] = (unsigned int) bestOffs;
+  }
+  return (byteCnts[0] + 1);
+}
+
 static std::vector< unsigned char > envCostTable;
 
 static size_t optimizeTrackData(
@@ -610,6 +663,213 @@ static void writeTrackData(
   }
 }
 
+static void convertFile(std::vector< unsigned char >& outBuf,
+                        const std::vector< unsigned short >& inBuf,
+                        size_t loadAddr, size_t maxLen1)
+{
+  size_t  nFrames = inBuf.size() >> 3;
+  std::vector< unsigned short > envBuf(inBuf);
+  std::vector< int >  envUsed;
+  std::vector< unsigned char >  len(nFrames * 8, 0);
+  std::vector< unsigned int >   offs(nFrames * 8);
+  std::map< unsigned int, unsigned char > npMapF;
+  std::map< unsigned int, unsigned char > npMapV;
+  std::vector< unsigned int >   offsTable(nFrames * 8, 0U);
+  RadixTree< unsigned short >   envTree;
+  size_t  prvEnvSize = 0x7FFFFFFF;
+  bool    finalPass = false;
+  for (size_t passCnt = 1; true; passCnt++) {
+    size_t  maxLen = passCnt * maxLen1;
+    if (maxLen > lengthMaxValue || finalPass)
+      maxLen = lengthMaxValue;
+    if (passCnt > 1 && !finalPass)
+      optimizeEnvelopes(envBuf, envUsed, len, offs);
+    size_t  envSize = envBuf.size() << 1;
+    bool    finalPassNext = (envSize >= prvEnvSize);
+    while (true) {
+      envTree.clear();
+      for (size_t i = envBuf.size(); i-- > 0; ) {
+        size_t  n = envBuf.size() - i;
+        if (n > maxLen)
+          n = maxLen;
+        envTree.addString(&(envBuf.front()), i, n);
+      }
+      offsTable.resize(nFrames * 8);
+      for (size_t i = 0; i < (nFrames * 8); i++) {
+        size_t  n = (nFrames * 8 - i) % nFrames;
+        if (!n)
+          n = nFrames;
+        if (n > maxLen)
+          n = maxLen;
+        unsigned int  tmpBuf[lengthMaxValue];
+        size_t  l = envTree.findMatches(&(tmpBuf[0]), &(envBuf.front()),
+                                        &(inBuf.front()) + i, n);
+        unsigned int  prvOffs = 0xFFFFFFFFU;
+        offsTable.push_back(0U);
+        for ( ; l >= 2; l--) {
+          unsigned int  d = tmpBuf[l - 1];
+          if (d != prvOffs) {
+            prvOffs = d;
+            offsTable.push_back(d);
+            offsTable.push_back((unsigned int) l);
+          }
+        }
+        offsTable[i] = (unsigned int) (offsTable.size() - 1);
+      }
+      if (passCnt > 1 || len[0] != 0)
+        break;
+      (void) optimizeTrackDataP1(len, offs, inBuf, offsTable);
+      optimizeEnvelopes(envBuf, envUsed, len, offs);
+      envSize = envBuf.size() << 1;
+    }
+    size_t  trkSize = 0;
+    size_t  totalSize = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
+    if (finalPass) {
+      envUsed.clear();
+      for (size_t k = 0; k < 2; k++) {
+        createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
+        trkSize = optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
+                                    npMapF, npMapV);
+      }
+      writeTrackData(outBuf, loadAddr, len, offs, npMapF, npMapV);
+      totalSize = outBuf.size();
+    }
+    else {
+      outBuf.clear();
+      npMapF.clear();
+      npMapV.clear();
+      for (size_t k = 0; k < 2; k++) {
+        (void) optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
+                                 npMapF, npMapV);
+        createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
+      }
+      trkSize = optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
+                                  npMapF, npMapV);
+      totalSize = totalSize + envSize + trkSize;
+    }
+    prvEnvSize = envSize;
+    std::fprintf(stderr,
+                 "\rPass %2d: file size:%6u bytes, "
+                 "envelope data: %5u, track data: %5u %c",
+                 int(passCnt), (unsigned int) totalSize,
+                 (unsigned int) envSize, (unsigned int) trkSize,
+                 (!finalPass ? ' ' : '\n'));
+    if (finalPass)
+      break;
+    finalPass = finalPassNext;
+  }
+}
+
+// ----------------------------------------------------------------------------
+
+static void decodeFile(std::vector< unsigned char >& outBuf,
+                       const std::vector< unsigned char >& inBuf,
+                       size_t loadAddr)
+{
+  outBuf.clear();
+  size_t  envOffs = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
+  size_t  envSize = 0;
+  if (inBuf.size() < (envOffs + 1))
+    errorMessage("invalid data size");
+  size_t  envTimers[8];
+  size_t  envPtrs[8];
+  size_t  trackPtrs[8];
+  for (size_t i = 0; i < 8; i++) {
+    envTimers[i] = 0;
+    envPtrs[i] = 0;
+    size_t  j = 0x0300;
+    if (!(loadAddr & loadAddr1TrkFlag))
+      j = j + (((i & 1) << 3) | (i & 6));
+    trackPtrs[i] = (size_t(inBuf[j + 1]) << 8) | inBuf[j];
+    if (trackPtrs[i] < ((loadAddr & 0xFF00) + envOffs + envSize))
+      errorMessage("invalid track offset");
+    trackPtrs[i] = trackPtrs[i] - (loadAddr & 0xFF00);
+    if (i == 0) {
+      envSize = trackPtrs[i] - envOffs;
+      if ((envOffs + envSize) > inBuf.size())
+        errorMessage("invalid track offset");
+    }
+  }
+  std::vector< unsigned char >  envData;
+  envData.insert(envData.end(),
+                 inBuf.begin() + envOffs, inBuf.begin() + (envOffs + envSize));
+  if (loadAddr & loadAddrDiffFlag) {
+    size_t  d = size_t(!(loadAddr & loadAddrNIFlag)) + 1;
+    for (size_t i = d; i < envData.size(); i++)
+      envData[i] = (envData[i] + envData[i - d]) & 0xFF;
+  }
+  for (size_t i = 0; true; i = ((i + 1) & 7)) {
+    if ((envTimers[i] & 0x3F) < 1) {
+      size_t& p = trackPtrs[(!(loadAddr & loadAddr1TrkFlag) ? i : 0)];
+      if (p >= inBuf.size())
+        errorMessage("unexpected end of data");
+      unsigned char c = inBuf[p];
+      if (c == 0x40 && i == 0)
+        break;
+      p++;
+      size_t  offs = 0;
+      if (c & 0x80) {
+        if (!(i & 1))
+          c = c & 0x7F;
+        offs = (size_t(inBuf[size_t(c) | 0x0200]) << 8)
+               | inBuf[size_t(c) | 0x0100];
+        c = inBuf[size_t(c)] >> 1;
+      }
+      else {
+        if (p >= inBuf.size())
+          errorMessage("unexpected end of data");
+        offs = inBuf[p];
+        p++;
+        if (!(c < 0x40 && i == 6)) {
+          if (p >= inBuf.size())
+            errorMessage("unexpected end of data");
+          offs = offs | (size_t(inBuf[p]) << 8);
+          p++;
+        }
+      }
+      if (c & 0x40) {
+        if (offs < ((loadAddr & 0xFF00) + envOffs))
+          errorMessage("invalid envelope data offset");
+        offs = offs - ((loadAddr & 0xFF00) + envOffs);
+      }
+      envTimers[i] = c;
+      envPtrs[i] = offs;
+    }
+    else {
+      envTimers[i]--;
+    }
+    if (i == 0)
+      outBuf.resize(outBuf.size() + 16, 0);
+    unsigned char l = (unsigned char) (envPtrs[i] & 0xFF);
+    unsigned char h = (unsigned char) (envPtrs[i] >> 8);
+    if (envTimers[i] & 0x40) {
+      if (!(loadAddr & loadAddrNIFlag)) {
+        if ((envPtrs[i] + 1) >= envData.size())
+          errorMessage("invalid envelope data offset");
+        l = envData[envPtrs[i]];
+        h = envData[envPtrs[i] + 1];
+        envPtrs[i] = envPtrs[i] + 2;
+      }
+      else {
+        if (envPtrs[i] >= (envData.size() >> 1))
+          errorMessage("invalid envelope data offset");
+        l = envData[envPtrs[i]];
+        h = envData[envPtrs[i] + (envData.size() >> 1)];
+        envPtrs[i] = envPtrs[i] + 1;
+      }
+    }
+    if (!(i & 1)) {
+      outBuf[outBuf.size() + i - 16] = l;
+      if (i != 6)
+        outBuf[outBuf.size() + i - 15] = h;
+    }
+    else {
+      outBuf[outBuf.size() + (i >> 1) - 8] = l;
+      outBuf[outBuf.size() + (i >> 1) - 4] = h;
+    }
+  }
+}
+
 // ----------------------------------------------------------------------------
 
 static size_t loadInputFile(std::vector< unsigned char >& inBuf,
@@ -736,232 +996,6 @@ static size_t loadInputFile(std::vector< unsigned short >& inBuf,
 
 // ----------------------------------------------------------------------------
 
-static void convertFile(std::vector< unsigned char >& outBuf,
-                        const std::vector< unsigned short >& inBuf,
-                        size_t loadAddr, size_t maxLen1)
-{
-  size_t  nFrames = inBuf.size() >> 3;
-  std::vector< unsigned short > envBuf(inBuf);
-  std::vector< int >  envUsed;
-  std::vector< unsigned char >  len(nFrames * 8);
-  std::vector< unsigned int >   offs(nFrames * 8);
-  std::map< unsigned int, unsigned char > npMapF;
-  std::map< unsigned int, unsigned char > npMapV;
-  std::vector< unsigned int >   offsTable(nFrames * 8, 0U);
-  RadixTree< unsigned short >   envTree;
-  size_t  prvEnvSize = 0x7FFFFFFF;
-  bool    finalPass = false;
-  for (size_t passCnt = 1; true; passCnt++) {
-    size_t  maxLen = passCnt * maxLen1;
-    if (maxLen > lengthMaxValue || finalPass)
-      maxLen = lengthMaxValue;
-    if (passCnt > 1 && !finalPass)
-      optimizeEnvelopes(envBuf, envUsed, len, offs);
-    envTree.clear();
-    for (size_t i = envBuf.size(); i-- > 0; ) {
-      size_t  n = envBuf.size() - i;
-      if (n > maxLen)
-        n = maxLen;
-      envTree.addString(&(envBuf.front()), i, n);
-    }
-    offsTable.resize(nFrames * 8);
-    for (size_t i = 0; i < (nFrames * 8); i++) {
-      size_t  n = (nFrames * 8 - i) % nFrames;
-      if (!n)
-        n = nFrames;
-      if (n > maxLen)
-        n = maxLen;
-      unsigned int  tmpBuf[lengthMaxValue];
-      size_t  l = envTree.findMatches(&(tmpBuf[0]), &(envBuf.front()),
-                                      &(inBuf.front()) + i, n);
-      unsigned int  prvOffs = 0xFFFFFFFFU;
-      offsTable.push_back(0U);
-      for ( ; l >= 2; l--) {
-        unsigned int  d = tmpBuf[l - 1];
-        if (d != prvOffs) {
-          prvOffs = d;
-          offsTable.push_back(d);
-          offsTable.push_back((unsigned int) l);
-        }
-      }
-      offsTable[i] = (unsigned int) (offsTable.size() - 1);
-    }
-    size_t  envSize = envBuf.size() << 1;
-    size_t  trkSize = 0;
-    size_t  totalSize = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
-    bool    finalPassNext = false;
-    if (finalPass) {
-      envUsed.clear();
-      for (size_t k = 0; k < 2; k++) {
-        createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
-        trkSize = optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
-                                    npMapF, npMapV);
-      }
-      writeTrackData(outBuf, loadAddr, len, offs, npMapF, npMapV);
-      totalSize = outBuf.size();
-    }
-    else {
-      if (passCnt == 1 && maxLen >= 10) {
-        for (size_t k = 0; k < 4; k++) {
-          (void) optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
-                                   npMapF, npMapV);
-          envUsed.clear();
-          envUsed.resize(envBuf.size() + 1, 0);
-          for (size_t i = 0; i < (nFrames * 8); i = i + len[i]) {
-            if (offs[i] & rleOffsetFlag)
-              continue;
-            for (size_t j = 0; j < len[i]; j++)
-              envUsed[offs[i] + j]++;
-          }
-          int     n = 0;
-          for (size_t i = 0; i < envUsed.size(); i++) {
-            int     tmp = envUsed[i];
-            envUsed[i] = n;
-            n = n + tmp;
-          }
-        }
-      }
-      if (passCnt > 1 || maxLen >= 10) {
-        outBuf.clear();
-        npMapF.clear();
-        npMapV.clear();
-        for (size_t k = 0; k < 2; k++) {
-          (void) optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
-                                   npMapF, npMapV);
-          createEnvTables(outBuf, loadAddr, npMapF, npMapV, envBuf, len, offs);
-        }
-      }
-      trkSize = optimizeTrackData(len, offs, inBuf, offsTable, envUsed,
-                                  npMapF, npMapV);
-      totalSize = totalSize + envSize + trkSize;
-      finalPassNext = (envSize >= prvEnvSize);
-      prvEnvSize = envSize;
-    }
-    std::fprintf(stderr,
-                 "\rPass %2d: file size:%6u bytes, "
-                 "envelope data: %5u, track data: %5u %c",
-                 int(passCnt), (unsigned int) totalSize,
-                 (unsigned int) envSize, (unsigned int) trkSize,
-                 (!finalPass ? ' ' : '\n'));
-    if (finalPassNext) {
-      finalPass = true;
-      continue;
-    }
-    if (finalPass)
-      break;
-  }
-}
-
-static void decodeFile(std::vector< unsigned char >& outBuf,
-                       const std::vector< unsigned char >& inBuf,
-                       size_t loadAddr)
-{
-  outBuf.clear();
-  size_t  envOffs = (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
-  size_t  envSize = 0;
-  if (inBuf.size() < (envOffs + 1))
-    errorMessage("invalid data size");
-  size_t  envTimers[8];
-  size_t  envPtrs[8];
-  size_t  trackPtrs[8];
-  for (size_t i = 0; i < 8; i++) {
-    envTimers[i] = 0;
-    envPtrs[i] = 0;
-    size_t  j = 0x0300;
-    if (!(loadAddr & loadAddr1TrkFlag))
-      j = j + (((i & 1) << 3) | (i & 6));
-    trackPtrs[i] = (size_t(inBuf[j + 1]) << 8) | inBuf[j];
-    if (trackPtrs[i] < ((loadAddr & 0xFF00) + envOffs + envSize))
-      errorMessage("invalid track offset");
-    trackPtrs[i] = trackPtrs[i] - (loadAddr & 0xFF00);
-    if (i == 0) {
-      envSize = trackPtrs[i] - envOffs;
-      if ((envOffs + envSize) > inBuf.size())
-        errorMessage("invalid track offset");
-    }
-  }
-  std::vector< unsigned char >  envData;
-  envData.insert(envData.end(),
-                 inBuf.begin() + envOffs, inBuf.begin() + (envOffs + envSize));
-  if (loadAddr & loadAddrDiffFlag) {
-    size_t  d = size_t(!(loadAddr & loadAddrNIFlag)) + 1;
-    for (size_t i = d; i < envData.size(); i++)
-      envData[i] = (envData[i] + envData[i - d]) & 0xFF;
-  }
-  for (size_t i = 0; true; i = ((i + 1) & 7)) {
-    if ((envTimers[i] & 0x3F) < 1) {
-      size_t& p = trackPtrs[(!(loadAddr & loadAddr1TrkFlag) ? i : 0)];
-      if (p >= inBuf.size())
-        errorMessage("unexpected end of data");
-      unsigned char c = inBuf[p];
-      if (c == 0x40 && i == 0)
-        break;
-      p++;
-      size_t  offs = 0;
-      if (c & 0x80) {
-        if (!(i & 1))
-          c = c & 0x7F;
-        offs = (size_t(inBuf[size_t(c) | 0x0200]) << 8)
-               | inBuf[size_t(c) | 0x0100];
-        c = inBuf[size_t(c)] >> 1;
-      }
-      else {
-        if (p >= inBuf.size())
-          errorMessage("unexpected end of data");
-        offs = inBuf[p];
-        p++;
-        if (!(c < 0x40 && i == 6)) {
-          if (p >= inBuf.size())
-            errorMessage("unexpected end of data");
-          offs = offs | (size_t(inBuf[p]) << 8);
-          p++;
-        }
-      }
-      if (c & 0x40) {
-        if (offs < ((loadAddr & 0xFF00) + envOffs))
-          errorMessage("invalid envelope data offset");
-        offs = offs - ((loadAddr & 0xFF00) + envOffs);
-      }
-      envTimers[i] = c;
-      envPtrs[i] = offs;
-    }
-    else {
-      envTimers[i]--;
-    }
-    if (i == 0)
-      outBuf.resize(outBuf.size() + 16, 0);
-    unsigned char l = (unsigned char) (envPtrs[i] & 0xFF);
-    unsigned char h = (unsigned char) (envPtrs[i] >> 8);
-    if (envTimers[i] & 0x40) {
-      if (!(loadAddr & loadAddrNIFlag)) {
-        if ((envPtrs[i] + 1) >= envData.size())
-          errorMessage("invalid envelope data offset");
-        l = envData[envPtrs[i]];
-        h = envData[envPtrs[i] + 1];
-        envPtrs[i] = envPtrs[i] + 2;
-      }
-      else {
-        if (envPtrs[i] >= (envData.size() >> 1))
-          errorMessage("invalid envelope data offset");
-        l = envData[envPtrs[i]];
-        h = envData[envPtrs[i] + (envData.size() >> 1)];
-        envPtrs[i] = envPtrs[i] + 1;
-      }
-    }
-    if (!(i & 1)) {
-      outBuf[outBuf.size() + i - 16] = l;
-      if (i != 6)
-        outBuf[outBuf.size() + i - 15] = h;
-    }
-    else {
-      outBuf[outBuf.size() + (i >> 1) - 8] = l;
-      outBuf[outBuf.size() + (i >> 1) - 4] = h;
-    }
-  }
-}
-
-// ----------------------------------------------------------------------------
-
 static void parseCommandLine(int argc, char **argv,
                              size_t& loadAddr, size_t& maxLen1,
                              int& zeroVolMode)
@@ -1054,7 +1088,7 @@ static void parseCommandLine(int argc, char **argv,
 int main(int argc, char **argv)
 {
   size_t  loadAddr = 0x1000;
-  size_t  maxLen1 = 12;
+  size_t  maxLen1 = 16;
   try {
     std::vector< unsigned short > inBuf;
     size_t  nFrames = 0;
