@@ -711,9 +711,8 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       maxLen = lengthMaxValue;
     if (passCnt > 1 && !finalPass)
       optimizeEnvelopes(envBuf, envUsed, len, offs);
-    size_t  envSize = envBuf.size() << 1;
-    bool    finalPassNext = (envSize >= prvEnvSize);
-    if (finalPassNext)
+    bool    finalPassNext = ((envBuf.size() << 1) >= prvEnvSize);
+    if (finalPassNext || finalPass)
       optimizeEnvelopes(envBuf, envUsed, len, offs, &envTree);
     while (true) {
       envTree.clear();
@@ -749,7 +748,6 @@ static void convertFile(std::vector< unsigned char >& outBuf,
         break;
       (void) optimizeTrackDataP1(len, offs, inBuf, offsTable);
       optimizeEnvelopes(envBuf, envUsed, len, offs);
-      envSize = envBuf.size() << 1;
     }
     size_t  trkSize = 0x7FFFFFFF;
     if (finalPass)
@@ -766,6 +764,7 @@ static void convertFile(std::vector< unsigned char >& outBuf,
       if (trkSize >= prvSize)
         break;
     }
+    size_t  envSize = envBuf.size() << 1;
     size_t  totalSize =
         envSize + trkSize + (!(loadAddr & loadAddr1TrkFlag) ? 0x0310 : 0x0302);
     if (finalPass) {
