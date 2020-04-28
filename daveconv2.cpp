@@ -326,44 +326,142 @@ template < typename T > void RadixTree< T >::clear()
 
 static void optimizeEnvelopes(std::vector< unsigned short >& envBuf,
                               std::vector< int >& envUsed,
-                              const std::vector< unsigned char >& len,
-                              const std::vector< unsigned int >& offs,
+                              const std::vector< unsigned char >& len_,
+                              const std::vector< unsigned int >& offs_,
                               RadixTree< unsigned short > *envTree =
                                   (RadixTree< unsigned short > *) 0)
 {
   std::vector< unsigned short > tmpEnv(envBuf);
+  std::vector< unsigned char >  len;
+  std::vector< unsigned int >   offs;
   envBuf.clear();
   envUsed.clear();
-  std::vector< int >  tmpEnvUsed(tmpEnv.size(), 0);
-  size_t  nFrames = len.size() >> 3;
-  if (envTree) {
-    envTree->clear();
-    for (size_t i = 0; i < (nFrames * 8); i = i + len[i]) {
-      if (offs[i] & rleOffsetFlag)
-        continue;
-      for (size_t j = 0; j < len[i]; j++)
-        tmpEnvUsed[offs[i] + j] = 1;
-    }
-    for (size_t i = 0; i < tmpEnvUsed.size(); i++) {
-      if (!tmpEnvUsed[i])
-        continue;
-      tmpEnvUsed[i] = 0;
-      size_t  l = 1;
-      while (l < lengthMaxValue &&
-             (i + l) < tmpEnvUsed.size() && tmpEnvUsed[i + l] != 0) {
-        l++;
-      }
-      envTree->addString(&(tmpEnv.front()), i, l);
+  for (size_t i = 0; i < len_.size(); i = i + len_[i]) {
+    if (!(offs_[i] & rleOffsetFlag)) {
+      len.push_back(len_[i]);
+      offs.push_back(offs_[i]);
     }
   }
-  for (size_t i = 0; i < (nFrames * 8); i = i + len[i]) {
-    if (offs[i] & rleOffsetFlag)
-      continue;
-    size_t  k = offs[i];
-    if (envTree) {
-      k = size_t(envTree->findString(&(tmpEnv.front()),
-                                     &(tmpEnv.front()) + offs[i], len[i]));
+  if (envTree) {
+    // merge pairs of sequences where one is a
+    // substring, prefix, or suffix of another
+    envTree->clear();
+    std::map< unsigned int, unsigned int >  tmp1;
+    {
+      std::map< unsigned int, unsigned int >  tmp2;
+      for (size_t i = 0; i < offs.size(); i++) {
+        std::map< unsigned int, unsigned int >::iterator  k =
+            tmp2.find(offs[i]);
+        if (k == tmp2.end())
+          tmp2.insert(std::pair< unsigned int, unsigned int >(offs[i], len[i]));
+        else if (len[i] > k->second)
+          k->second = len[i];
+      }
+      for (std::map< unsigned int, unsigned int >::iterator i = tmp2.begin();
+           i != tmp2.end(); i++) {
+        unsigned int  d = i->first;
+        unsigned int  l = i->second;
+        tmp1.insert(std::pair< unsigned int, unsigned int >(
+                        (unsigned int) envBuf.size(), l));
+        envBuf.insert(envBuf.end(), tmpEnv.begin() + d, tmpEnv.begin() + d + l);
+      }
     }
+    for (std::map< unsigned int, unsigned int >::iterator i = tmp1.begin();
+         i != tmp1.end(); ) {
+      std::map< unsigned int, unsigned int >::iterator  k = i;
+      i++;
+      if (envTree->findString(&(envBuf.front()),
+                              &(envBuf.front()) + k->first, k->second) < 0L) {
+        for (size_t j = 0; j < k->second; j++)
+          envTree->addString(&(envBuf.front()), k->first + j, k->second - j);
+      }
+      else {
+        tmp1.erase(k);
+      }
+    }
+    for (std::map< unsigned int, unsigned int >::iterator i = tmp1.begin();
+         i != tmp1.end(); ) {
+      std::map< unsigned int, unsigned int >::iterator  k = i;
+      i++;
+      if (envTree->findString(&(envBuf.front()),
+                              &(envBuf.front()) + k->first, k->second)
+          != long(k->first)) {
+        tmp1.erase(k);
+      }
+    }
+    envTree->clear();
+    for (std::map< unsigned int, unsigned int >::iterator i = tmp1.begin();
+         i != tmp1.end(); i++) {
+      envTree->addString(&(envBuf.front()), i->first, i->second);
+    }
+    while (true) {
+      unsigned int  bestOffs1 = 0U;
+      unsigned int  bestOffs2 = 0U;
+      size_t  bestOverlap = 0;
+      size_t  bestOverlapOffs = 0;
+      for (std::map< unsigned int, unsigned int >::iterator i = tmp1.begin();
+           i != tmp1.end(); i++) {
+        size_t  d = i->first;
+        size_t  l = i->second;
+        for (size_t j = 1; j < l && (l - j) >= bestOverlap; j++) {
+          long    k = envTree->findString(&(envBuf.front()),
+                                          &(envBuf.front()) + d + j, l - j);
+          if (k < 0L || tmp1.find((unsigned int) k) == tmp1.end() ||
+              size_t(k) == d) {
+            continue;
+          }
+          size_t  n = l - j;
+          if (n > bestOverlap ||
+              (n == bestOverlap &&
+               (l + tmp1[k]) < (tmp1[bestOffs1] + tmp1[bestOffs2]))) {
+            bestOverlap = n;
+            bestOverlapOffs = j;
+            bestOffs1 = (unsigned int) d;
+            bestOffs2 = (unsigned int) k;
+          }
+        }
+      }
+      if (bestOverlap < 1)
+        break;
+      unsigned int  newOffs = (unsigned int) envBuf.size();
+      unsigned int  newLen = (unsigned int) bestOverlapOffs + tmp1[bestOffs2];
+      for (size_t i = 0; i < bestOverlapOffs; i++)
+        envBuf.push_back(envBuf[bestOffs1 + i]);
+      for (size_t i = bestOverlapOffs; i < newLen; i++)
+        envBuf.push_back(envBuf[bestOffs2 + i - bestOverlapOffs]);
+      envTree->addString(&(envBuf.front()), newOffs, newLen);
+      tmp1.erase(bestOffs1);
+      tmp1.erase(bestOffs2);
+      tmp1.insert(std::pair< unsigned int, unsigned int >(newOffs, newLen));
+    }
+    envTree->clear();
+    {
+      std::vector< unsigned short > tmpEnv2;
+      for (std::map< unsigned int, unsigned int >::iterator i = tmp1.begin();
+           i != tmp1.end(); i++) {
+        for (size_t j = 0; j < i->second; j++)
+          tmpEnv2.push_back(envBuf[i->first + j]);
+      }
+      envBuf.clear();
+      for (size_t i = tmpEnv2.size(); i-- > 0; ) {
+        size_t  l = tmpEnv2.size() - i;
+        if (l > lengthMaxValue)
+          l = lengthMaxValue;
+        envTree->addString(&(tmpEnv2.front()), i, l);
+      }
+      for (size_t i = 0; i < offs.size(); i++) {
+        long    k = envTree->findString(&(tmpEnv2.front()),
+                                        &(tmpEnv.front()) + offs[i], len[i]);
+        if (EP128EMU_UNLIKELY(k < 0L))
+          errorMessage("internal error in optimizeEnvelopes()");
+        offs[i] = (unsigned int) k;
+      }
+      tmpEnv = tmpEnv2;
+    }
+  }
+  std::vector< int >  tmpEnvUsed(tmpEnv.size(), 0);
+  for (size_t i = 0; i < len.size(); i++) {
+    size_t  k = offs[i];
     for (size_t j = 0; j < len[i]; j++)
       tmpEnvUsed[k + j]++;
   }
@@ -712,7 +810,7 @@ static void convertFile(std::vector< unsigned char >& outBuf,
     if (passCnt > 1 && !finalPass)
       optimizeEnvelopes(envBuf, envUsed, len, offs);
     bool    finalPassNext = ((envBuf.size() << 1) >= prvEnvSize);
-    if (finalPassNext || finalPass)
+    if (finalPassNext)
       optimizeEnvelopes(envBuf, envUsed, len, offs, &envTree);
     while (true) {
       envTree.clear();
